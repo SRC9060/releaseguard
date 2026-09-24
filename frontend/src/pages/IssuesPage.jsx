@@ -14,6 +14,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useProject } from '../context/ProjectContext';
+import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import {
   formatRelativeTime,
@@ -28,6 +29,7 @@ import { ErrorState } from '../components/common/ErrorState';
 import TestEventModal from '../components/events/TestEventModal';
 
 export function IssuesPage() {
+  const { selectedTenant } = useAuth();
   const { selectedProject, isLoading: isProjectLoading } = useProject();
   const [issues, setIssues] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -49,7 +51,12 @@ export function IssuesPage() {
     setError(null);
     try {
       const backendStatus = statusFilter === 'all' ? null : statusFilter;
-      const data = await api.getIssues(selectedProject.id, backendStatus);
+      let data = [];
+      if (selectedTenant) {
+        data = await api.getTenantIssues(selectedTenant.id, selectedProject.id, backendStatus);
+      } else {
+        data = await api.getIssues(selectedProject.id, backendStatus);
+      }
       setIssues(data);
     } catch (err) {
       console.error('Failed to fetch issues:', err);
@@ -57,7 +64,7 @@ export function IssuesPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedProject?.id, statusFilter]);
+  }, [selectedProject?.id, selectedTenant?.id, statusFilter]);
 
   useEffect(() => {
     fetchIssues();

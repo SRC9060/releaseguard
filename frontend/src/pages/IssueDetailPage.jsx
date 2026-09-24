@@ -26,6 +26,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { useProject } from '../context/ProjectContext';
+import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import {
   formatRelativeTime,
@@ -39,6 +40,7 @@ import { ErrorState } from '../components/common/ErrorState';
 
 export function IssueDetailPage() {
   const { id } = useParams();
+  const { selectedTenant } = useAuth();
   const { selectedProject } = useProject();
 
   // Issue Metadata
@@ -76,7 +78,12 @@ export function IssueDetailPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await api.getIssue(selectedProject.id, id);
+      let data = null;
+      if (selectedTenant) {
+        data = await api.getTenantIssue(selectedTenant.id, selectedProject.id, id);
+      } else {
+        data = await api.getIssue(selectedProject.id, id);
+      }
       setIssue(data);
     } catch (err) {
       console.error('Failed to fetch issue details:', err);
@@ -84,7 +91,7 @@ export function IssueDetailPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedProject?.id, id]);
+  }, [selectedProject?.id, selectedTenant?.id, id]);
 
   // 2. Fetch Events
   const fetchEvents = useCallback(
@@ -98,7 +105,12 @@ export function IssueDetailPage() {
       }
 
       try {
-        const resp = await api.getIssueEvents(selectedProject.id, id, 50, offset);
+        let resp = null;
+        if (selectedTenant) {
+          resp = await api.getTenantIssueEvents(selectedTenant.id, selectedProject.id, id, 50, offset);
+        } else {
+          resp = await api.getIssueEvents(selectedProject.id, id, 50, offset);
+        }
         if (append) {
           setEvents((prev) => [...prev, ...resp.items]);
         } else {
@@ -117,7 +129,7 @@ export function IssueDetailPage() {
         setIsLoadingMore(false);
       }
     },
-    [selectedProject?.id, id, selectedEvent]
+    [selectedProject?.id, selectedTenant?.id, id, selectedEvent]
   );
 
   // 3. Fetch Time-Series Trend
@@ -127,7 +139,12 @@ export function IssueDetailPage() {
 
       setIsLoadingTrend(true);
       try {
-        const data = await api.getIssueTimeseries(selectedProject.id, id, range);
+        let data = null;
+        if (selectedTenant) {
+          data = await api.getTenantIssueTimeseries(selectedTenant.id, selectedProject.id, id, range);
+        } else {
+          data = await api.getIssueTimeseries(selectedProject.id, id, range);
+        }
         setTrendData(data);
       } catch (err) {
         console.error('Failed to fetch issue timeseries:', err);
@@ -135,7 +152,7 @@ export function IssueDetailPage() {
         setIsLoadingTrend(false);
       }
     },
-    [selectedProject?.id, id]
+    [selectedProject?.id, selectedTenant?.id, id]
   );
 
   useEffect(() => {
@@ -156,13 +173,25 @@ export function IssueDetailPage() {
     try {
       let updated = null;
       if (action === 'resolve') {
-        updated = await api.resolveIssue(selectedProject.id, issue.id);
+        if (selectedTenant) {
+          updated = await api.resolveTenantIssue(selectedTenant.id, selectedProject.id, issue.id);
+        } else {
+          updated = await api.resolveIssue(selectedProject.id, issue.id);
+        }
         setFeedback({ type: 'success', text: 'Issue marked as resolved.' });
       } else if (action === 'mute') {
-        updated = await api.muteIssue(selectedProject.id, issue.id);
+        if (selectedTenant) {
+          updated = await api.muteTenantIssue(selectedTenant.id, selectedProject.id, issue.id);
+        } else {
+          updated = await api.muteIssue(selectedProject.id, issue.id);
+        }
         setFeedback({ type: 'success', text: 'Issue muted.' });
       } else if (action === 'unresolve') {
-        updated = await api.unresolveIssue(selectedProject.id, issue.id);
+        if (selectedTenant) {
+          updated = await api.unresolveTenantIssue(selectedTenant.id, selectedProject.id, issue.id);
+        } else {
+          updated = await api.unresolveIssue(selectedProject.id, issue.id);
+        }
         setFeedback({ type: 'success', text: 'Issue restored to unresolved.' });
       }
       if (updated) {

@@ -1,15 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import { useAuth } from './AuthContext';
 
 const ProjectContext = createContext(null);
 const STORAGE_KEY = 'releaseguard_active_project_id';
 
 export function ProjectProvider({ children }) {
+  const { selectedTenant, isAuthenticated } = useAuth();
   const [projects, setProjects] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY);
-    return saved ? Number(saved) : null;
-  });
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [selectedProject, setSelectedProject] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -18,18 +17,24 @@ export function ProjectProvider({ children }) {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await api.getProjects();
+      let data = [];
+      if (selectedTenant) {
+        data = await api.getTenantProjects(selectedTenant.id);
+      } else if (!isAuthenticated) {
+        data = await api.getProjects();
+      }
       setProjects(data);
 
       if (data.length > 0) {
-        // Find previously selected or default to first project
-        const match = data.find((p) => p.id === selectedProjectId) || data[0];
+        const saved = Number(localStorage.getItem(STORAGE_KEY));
+        const match = data.find((p) => p.id === saved) || data[0];
         setSelectedProjectId(match.id);
         setSelectedProject(match);
         localStorage.setItem(STORAGE_KEY, match.id.toString());
       } else {
         setSelectedProjectId(null);
         setSelectedProject(null);
+        localStorage.removeItem(STORAGE_KEY);
       }
     } catch (err) {
       console.error('Failed to load projects:', err);
@@ -37,11 +42,11 @@ export function ProjectProvider({ children }) {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedProjectId]);
+  }, [selectedTenant?.id, isAuthenticated]);
 
   useEffect(() => {
     loadProjects();
-  }, []);
+  }, [loadProjects]);
 
   const selectProject = useCallback(
     (projectOrId) => {
@@ -56,14 +61,22 @@ export function ProjectProvider({ children }) {
     [projects]
   );
 
-  const createProject = useCallback(async (name) => {
-    const created = await api.createProject(name);
-    setProjects((prev) => [...prev, created]);
-    setSelectedProjectId(created.id);
-    setSelectedProject(created);
-    localStorage.setItem(STORAGE_KEY, created.id.toString());
-    return created;
-  }, []);
+  const createProject = useCallback(
+    async (name) => {
+      let created = null;
+      if (selectedTenant) {
+        created = await api.createTenantProject(selectedTenant.id, name);
+      } else {
+        created = await api.createProject(name);
+      }
+      setProjects((prev) => [...prev, created]);
+      setSelectedProjectId(created.id);
+      setSelectedProject(created);
+      localStorage.setItem(STORAGE_KEY, created.id.toString());
+      return created;
+    },
+    [selectedTenant?.id]
+  );
 
   const value = {
     projects,
@@ -86,3 +99,5 @@ export function useProject() {
   }
   return context;
 }
+
+export default ProjectContext;

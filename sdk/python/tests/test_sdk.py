@@ -333,3 +333,38 @@ def test_sdk_retry_preserves_event_id():
     assert attempt_1_ids == attempt_2_ids
     assert len(attempt_1_ids) == 1
     client.shutdown(timeout=0.5)
+
+
+def test_sdk_http_transport_sends_api_key_header():
+    """Verify that HttpTransport attaches X-ReleaseGuard-Key header when api_key is configured."""
+    from unittest.mock import patch, MagicMock
+    from releaseguard_sdk.transport import HttpTransport
+
+    config_with_key = Config(project_id=42, api_key="rg_live_test_api_key_123")
+    transport = HttpTransport(config_with_key)
+
+    captured_requests = []
+
+    def mock_urlopen(req, timeout=None):
+        captured_requests.append(req)
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value.read.return_value = b'{"status": "ok"}'
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        # 1. Single event
+        event = build_event_from_message("Single test", release="1.0.0")
+        transport.send_event(event)
+
+        # 2. Batch event
+        transport.send_batch([event])
+
+    assert len(captured_requests) == 2
+
+    # Check single event request headers
+    single_req = captured_requests[0]
+    assert single_req.get_header("X-releaseguard-key") == "rg_live_test_api_key_123"
+
+    # Check batch event request headers
+    batch_req = captured_requests[1]
+    assert batch_req.get_header("X-releaseguard-key") == "rg_live_test_api_key_123"

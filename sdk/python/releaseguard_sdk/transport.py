@@ -60,6 +60,7 @@ class HttpTransport(BaseTransport):
             "User-Agent": "releaseguard-python-sdk/0.2.0",
         }
         if self.config.api_key:
+            headers["X-ReleaseGuard-Key"] = self.config.api_key
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
         req = urllib.request.Request(

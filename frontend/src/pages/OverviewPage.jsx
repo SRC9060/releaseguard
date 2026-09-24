@@ -22,6 +22,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { useProject } from '../context/ProjectContext';
+import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import {
   formatRelativeTime,
@@ -36,6 +37,7 @@ import { ErrorState } from '../components/common/ErrorState';
 import TestEventModal from '../components/events/TestEventModal';
 
 export function OverviewPage() {
+  const { selectedTenant } = useAuth();
   const { selectedProject, isLoading: isProjectLoading } = useProject();
   const [issues, setIssues] = useState([]);
   const [isLoadingIssues, setIsLoadingIssues] = useState(true);
@@ -59,7 +61,12 @@ export function OverviewPage() {
     setIsLoadingIssues(true);
     setError(null);
     try {
-      const issuesData = await api.getIssues(selectedProject.id);
+      let issuesData = [];
+      if (selectedTenant) {
+        issuesData = await api.getTenantIssues(selectedTenant.id, selectedProject.id);
+      } else {
+        issuesData = await api.getIssues(selectedProject.id);
+      }
       setIssues(issuesData);
     } catch (err) {
       console.error('Failed to fetch issues:', err);
@@ -67,7 +74,7 @@ export function OverviewPage() {
     } finally {
       setIsLoadingIssues(false);
     }
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, selectedTenant?.id]);
 
   const fetchTimeseries = useCallback(
     async (range) => {
@@ -75,7 +82,12 @@ export function OverviewPage() {
 
       setIsLoadingTrend(true);
       try {
-        const data = await api.getProjectTimeseries(selectedProject.id, range);
+        let data = null;
+        if (selectedTenant) {
+          data = await api.getTenantProjectTimeseries(selectedTenant.id, selectedProject.id, range);
+        } else {
+          data = await api.getProjectTimeseries(selectedProject.id, range);
+        }
         setTrendData(data);
       } catch (err) {
         console.error('Failed to fetch project timeseries:', err);
@@ -83,7 +95,7 @@ export function OverviewPage() {
         setIsLoadingTrend(false);
       }
     },
-    [selectedProject?.id]
+    [selectedProject?.id, selectedTenant?.id]
   );
 
   useEffect(() => {

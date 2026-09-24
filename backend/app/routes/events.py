@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
@@ -150,10 +150,19 @@ def compute_timeseries(
 def ingest_events_bulk(
     project_id: int,
     payload: BulkErrorEventsCreate,
+    request: Request,
     db: Session = Depends(get_db),
     queue: EventQueue = Depends(get_queue),
 ):
-    get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id)
+
+    client_key = request.headers.get("X-ReleaseGuard-Key")
+    if client_key is not None:
+        if project.api_key != client_key:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid ReleaseGuard project key for this project",
+            )
 
     events_data = [e.model_dump() for e in payload.events]
     batch_id, accepted_count = queue.enqueue_events(project_id, events_data)
@@ -187,9 +196,18 @@ def get_queue_stats(
 def ingest_event(
     project_id: int,
     payload: ErrorEventCreate,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id)
+
+    client_key = request.headers.get("X-ReleaseGuard-Key")
+    if client_key is not None:
+        if project.api_key != client_key:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid ReleaseGuard project key for this project",
+            )
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     fingerprint = make_fingerprint(payload.exception_type, payload.stack_trace)
