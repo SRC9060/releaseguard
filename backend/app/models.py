@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -20,6 +20,7 @@ class Issue(Base):
     __tablename__ = "issues"
     __table_args__ = (
         UniqueConstraint("project_id", "fingerprint", name="uq_project_fingerprint"),
+        Index("ix_issues_project_status", "project_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -27,6 +28,11 @@ class Issue(Base):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="unresolved")
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    muted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_regression: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    regressed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
@@ -36,6 +42,9 @@ class Issue(Base):
 
 class ErrorEvent(Base):
     __tablename__ = "error_events"
+    __table_args__ = (
+        Index("ix_error_events_issue_received", "issue_id", "received_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)

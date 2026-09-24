@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertOctagon,
@@ -11,19 +11,24 @@ import {
   Copy,
   Check,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 import {
-  BarChart,
-  Bar,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
-  Cell,
 } from 'recharts';
 import { useProject } from '../context/ProjectContext';
 import api from '../services/api';
-import { formatRelativeTime, formatNumber, formatFingerprint } from '../utils/formatters';
+import {
+  formatRelativeTime,
+  formatExactTimestamp,
+  formatNumber,
+  formatFingerprint,
+} from '../utils/formatters';
 import { Badge } from '../components/common/Badge';
 import { LoadingSpinner, SkeletonCard, SkeletonRow } from '../components/common/LoadingState';
 import { EmptyState } from '../components/common/EmptyState';
@@ -33,34 +38,61 @@ import TestEventModal from '../components/events/TestEventModal';
 export function OverviewPage() {
   const { selectedProject, isLoading: isProjectLoading } = useProject();
   const [issues, setIssues] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingIssues, setIsLoadingIssues] = useState(true);
   const [error, setError] = useState(null);
+
+  // Time-Series Analytics for Project Error Volume
+  const [trendRange, setTrendRange] = useState('24h');
+  const [trendData, setTrendData] = useState(null);
+  const [isLoadingTrend, setIsLoadingTrend] = useState(false);
+
   const [copiedFp, setCopiedFp] = useState(null);
   const [isTestModalOpen, setIsTestModalOpen] = useState(false);
 
-  const fetchIssues = async () => {
+  const fetchOverviewData = useCallback(async () => {
     if (!selectedProject) {
       setIssues([]);
-      setIsLoading(false);
+      setIsLoadingIssues(false);
       return;
     }
 
-    setIsLoading(true);
+    setIsLoadingIssues(true);
     setError(null);
     try {
-      const data = await api.getIssues(selectedProject.id);
-      setIssues(data);
+      const issuesData = await api.getIssues(selectedProject.id);
+      setIssues(issuesData);
     } catch (err) {
       console.error('Failed to fetch issues:', err);
       setError(err.message || 'Failed to fetch issues');
     } finally {
-      setIsLoading(false);
+      setIsLoadingIssues(false);
     }
-  };
+  }, [selectedProject?.id]);
+
+  const fetchTimeseries = useCallback(
+    async (range) => {
+      if (!selectedProject) return;
+
+      setIsLoadingTrend(true);
+      try {
+        const data = await api.getProjectTimeseries(selectedProject.id, range);
+        setTrendData(data);
+      } catch (err) {
+        console.error('Failed to fetch project timeseries:', err);
+      } finally {
+        setIsLoadingTrend(false);
+      }
+    },
+    [selectedProject?.id]
+  );
 
   useEffect(() => {
-    fetchIssues();
-  }, [selectedProject?.id]);
+    fetchOverviewData();
+  }, [fetchOverviewData]);
+
+  useEffect(() => {
+    fetchTimeseries(trendRange);
+  }, [fetchTimeseries, trendRange]);
 
   const handleCopyFingerprint = (e, fp) => {
     e.stopPropagation();
@@ -95,15 +127,24 @@ export function OverviewPage() {
   );
   const recentIssues = sortedByLastSeen.slice(0, 5);
 
-  // Prepare chart data for top 5 issues by occurrence
-  const chartData = sortedByOccurrences.slice(0, 6).map((item) => ({
-    name: item.title.length > 24 ? `${item.title.slice(0, 22)}...` : item.title,
-    fullName: item.title,
-    occurrences: item.count,
-    fingerprint: item.fingerprint,
-  }));
-
-  const BAR_COLORS = ['#6366f1', '#818cf8', '#a5b4fc', '#4f46e5', '#4338ca', '#3730a3'];
+  // Format chart buckets for rendering
+  const formattedBuckets =
+    trendData?.buckets?.map((b) => {
+      const dt = new Date(b.timestamp);
+      let label = '';
+      if (trendRange === '1h') {
+        label = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      } else if (trendRange === '24h') {
+        label = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      } else {
+        label = dt.toLocaleDateString([], { month: 'short', day: 'numeric' });
+      }
+      return {
+        timestamp: b.timestamp,
+        label,
+        count: b.count,
+      };
+    }) || [];
 
   return (
     <div className="space-y-6 animate-in fade-in duration-150">
@@ -117,14 +158,14 @@ export function OverviewPage() {
             </Badge>
           </div>
           <p className="text-xs text-zinc-400">
-            Real-time error capture, fingerprint clustering, and reliability metrics.
+            Real-time error capture, fingerprint clustering, and historical reliability volume.
           </p>
         </div>
 
         <button
           type="button"
           onClick={() => setIsTestModalOpen(true)}
-          className="inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition shadow-sm self-start sm:self-auto"
+          className="inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition shadow-sm self-start sm:self-auto cursor-pointer"
         >
           <Sparkles className="h-3.5 w-3.5" />
           <span>Simulate Error Event</span>
@@ -132,12 +173,12 @@ export function OverviewPage() {
       </div>
 
       {error ? (
-        <ErrorState message={error} onRetry={fetchIssues} />
+        <ErrorState message={error} onRetry={fetchOverviewData} />
       ) : (
         <>
           {/* Top Metric Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {isLoading ? (
+            {isLoadingIssues ? (
               <>
                 <SkeletonCard />
                 <SkeletonCard />
@@ -205,24 +246,72 @@ export function OverviewPage() {
             )}
           </div>
 
-          {/* Visualization Section */}
-          {issues.length > 0 && (
-            <div className="p-5 rounded-xl bg-[#0f1118] border border-zinc-800/80 shadow-xs">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-sm font-semibold text-zinc-200 m-0">Error Volume Distribution</h2>
-                  <p className="text-[11px] text-zinc-500">
-                    Highest impact failure clusters by occurrence count
-                  </p>
+          {/* Historical Error Volume Time-Series Chart */}
+          <div className="p-5 rounded-xl bg-[#0f1118] border border-zinc-800/80 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4 text-indigo-400" />
+                  <h2 className="text-sm font-semibold text-zinc-200 m-0">
+                    Historical Error Volume
+                  </h2>
                 </div>
-                <Badge variant="mono">Top {chartData.length} issues</Badge>
+                <p className="text-[11px] text-zinc-500 mt-0.5 mb-0">
+                  Total project failure events aggregated across all active issues
+                </p>
               </div>
 
-              <div className="h-64 w-full">
+              {/* Range Selector Controls */}
+              <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800 self-start sm:self-auto">
+                {['1h', '24h', '7d'].map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setTrendRange(r)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-md transition cursor-pointer ${
+                      trendRange === r
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-850'
+                    }`}
+                  >
+                    {r.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Chart Area */}
+            {isLoadingTrend ? (
+              <div className="h-56 flex items-center justify-center text-xs text-zinc-500">
+                <RefreshCw className="h-4 w-4 animate-spin mr-2" />
+                Loading error volume trend...
+              </div>
+            ) : trendData?.total_events === 0 ? (
+              <div className="h-56 flex flex-col items-center justify-center text-center p-6 border border-dashed border-zinc-800 rounded-lg">
+                <Activity className="h-7 w-7 text-zinc-600 mb-2" />
+                <p className="text-xs text-zinc-300 font-semibold mb-1">
+                  Zero Errors In Last {trendRange}
+                </p>
+                <p className="text-[11px] text-zinc-500 max-w-sm">
+                  No ingested error events were recorded for project {selectedProject.name} during this
+                  time interval.
+                </p>
+              </div>
+            ) : (
+              <div className="h-56 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+                  <AreaChart
+                    data={formattedBuckets}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  >
+                    <defs>
+                      <linearGradient id="projectTrendGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
+                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0.0} />
+                      </linearGradient>
+                    </defs>
                     <XAxis
-                      dataKey="name"
+                      dataKey="label"
                       stroke="#52525b"
                       fontSize={11}
                       tickLine={false}
@@ -241,12 +330,12 @@ export function OverviewPage() {
                           const data = payload[0].payload;
                           return (
                             <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl text-xs space-y-1">
-                              <p className="font-semibold text-zinc-200">{data.fullName}</p>
-                              <p className="text-indigo-400 font-mono">
-                                Occurrences: <span className="font-bold">{formatNumber(data.occurrences)}</span>
-                              </p>
-                              <p className="text-[10px] text-zinc-500 font-mono">
-                                Fingerprint: {formatFingerprint(data.fingerprint, 16)}
+                              <p className="text-zinc-400 font-mono text-[10px]">{data.timestamp}</p>
+                              <p className="text-indigo-300 font-semibold font-mono">
+                                Ingested Events:{' '}
+                                <span className="font-bold text-white">
+                                  {formatNumber(data.count)}
+                                </span>
                               </p>
                             </div>
                           );
@@ -254,16 +343,19 @@ export function OverviewPage() {
                         return null;
                       }}
                     />
-                    <Bar dataKey="occurrences" radius={[4, 4, 0, 0]}>
-                      {chartData.map((_, index) => (
-                        <Cell key={`cell-${index}`} fill={BAR_COLORS[index % BAR_COLORS.length]} />
-                      ))}
-                    </Bar>
-                  </BarChart>
+                    <Area
+                      type="monotone"
+                      dataKey="count"
+                      stroke="#6366f1"
+                      strokeWidth={2}
+                      fillOpacity={1}
+                      fill="url(#projectTrendGrad)"
+                    />
+                  </AreaChart>
                 </ResponsiveContainer>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* Recent Issues Table */}
           <div className="p-5 rounded-xl bg-[#0f1118] border border-zinc-800/80 shadow-xs">
@@ -284,7 +376,7 @@ export function OverviewPage() {
               </Link>
             </div>
 
-            {isLoading ? (
+            {isLoadingIssues ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <tbody>
@@ -302,7 +394,7 @@ export function OverviewPage() {
                 action={
                   <button
                     onClick={() => setIsTestModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition cursor-pointer"
                   >
                     <Sparkles className="h-3.5 w-3.5" />
                     Simulate First Error
@@ -328,7 +420,10 @@ export function OverviewPage() {
                         className="group hover:bg-zinc-800/40 transition cursor-pointer"
                       >
                         <td className="py-3 px-3 font-medium text-zinc-200 max-w-xs truncate">
-                          <Link to={`/issues/${issue.id}`} className="hover:text-indigo-300 block truncate">
+                          <Link
+                            to={`/issues/${issue.id}`}
+                            className="hover:text-indigo-300 block truncate"
+                          >
                             {issue.title}
                           </Link>
                         </td>
@@ -337,7 +432,7 @@ export function OverviewPage() {
                           <button
                             onClick={(e) => handleCopyFingerprint(e, issue.fingerprint)}
                             title="Click to copy full fingerprint"
-                            className="inline-flex items-center gap-1 font-mono text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800 transition"
+                            className="inline-flex items-center gap-1 font-mono text-[11px] text-zinc-400 hover:text-zinc-200 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800 transition cursor-pointer"
                           >
                             <span>{formatFingerprint(issue.fingerprint, 8)}</span>
                             {copiedFp === issue.fingerprint ? (
@@ -380,7 +475,10 @@ export function OverviewPage() {
       <TestEventModal
         isOpen={isTestModalOpen}
         onClose={() => setIsTestModalOpen(false)}
-        onEventSent={() => fetchIssues()}
+        onEventSent={() => {
+          fetchOverviewData();
+          fetchTimeseries(trendRange);
+        }}
       />
     </div>
   );

@@ -54,5 +54,41 @@ class IssueResponse(BaseModel):
     fingerprint: str
     title: str
     count: int
+    status: str = "unresolved"
+    resolved_at: datetime | None = None
+    muted_at: datetime | None = None
+    is_regression: bool = False
+    regressed_at: datetime | None = None
     first_seen: datetime
     last_seen: datetime
+
+
+class IssueEventItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_id: str
+    exception_type: str
+    message: str
+    stack_trace: str
+    release: str | None = None
+    received_at: datetime
+
+
+class PaginatedEventsResponse(BaseModel):
+    items: list[IssueEventItem]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class TimeSeriesBucket(BaseModel):
+    timestamp: str
+    count: int
+
+
+class TimeSeriesResponse(BaseModel):
+    range: str
+    total_events: int
+    buckets: list[TimeSeriesBucket]

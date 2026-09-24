@@ -66,7 +66,11 @@ export const api = {
     }),
 
   // Issues
-  getIssues: (projectId) => request(`/api/v1/projects/${projectId}/issues`),
+  getIssues: (projectId, status = null) => {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    return request(`/api/v1/projects/${projectId}/issues${query}`);
+  },
+
   getIssue: async (projectId, issueId) => {
     try {
       return await request(`/api/v1/projects/${projectId}/issues/${issueId}`);
@@ -81,11 +85,51 @@ export const api = {
     }
   },
 
+  // Issue Status Actions (Phase 6)
+  resolveIssue: (projectId, issueId) =>
+    request(`/api/v1/projects/${projectId}/issues/${issueId}/resolve`, {
+      method: 'POST',
+    }),
+
+  muteIssue: (projectId, issueId) =>
+    request(`/api/v1/projects/${projectId}/issues/${issueId}/mute`, {
+      method: 'POST',
+    }),
+
+  unresolveIssue: (projectId, issueId) =>
+    request(`/api/v1/projects/${projectId}/issues/${issueId}/unresolve`, {
+      method: 'POST',
+    }),
+
+  // Event Timeline & Details (Phase 6)
+  getIssueEvents: (projectId, issueId, limit = 50, offset = 0) =>
+    request(
+      `/api/v1/projects/${projectId}/issues/${issueId}/events?limit=${limit}&offset=${offset}`
+    ),
+
+  // Time Series Metrics (Phase 6)
+  getIssueTimeseries: (projectId, issueId, range = '24h') =>
+    request(
+      `/api/v1/projects/${projectId}/metrics/issues/${issueId}/timeseries?range=${encodeURIComponent(range)}`
+    ),
+
+  getProjectTimeseries: (projectId, range = '24h') =>
+    request(
+      `/api/v1/projects/${projectId}/metrics/timeseries?range=${encodeURIComponent(range)}`
+    ),
+
   // Error Ingestion (Simulation / Test trigger)
   ingestEvent: (projectId, eventData) =>
     request(`/api/v1/projects/${projectId}/events`, {
       method: 'POST',
       body: JSON.stringify(eventData),
+    }),
+
+  // Bulk Ingestion
+  ingestEventsBulk: (projectId, events) =>
+    request(`/api/v1/projects/${projectId}/events/bulk`, {
+      method: 'POST',
+      body: JSON.stringify({ events }),
     }),
 };
 

@@ -72,7 +72,9 @@ class IngestionWorker:
             else:
                 from sqlalchemy.dialects.sqlite import insert as upsert
 
-            # Step 1: Atomic Issue upsert: creates or increments issue
+            from sqlalchemy import case
+
+            # Step 1: Atomic Issue upsert: creates or increments issue with regression detection
             stmt_issue = (
                 upsert(Issue)
                 .values(
@@ -80,6 +82,8 @@ class IngestionWorker:
                     fingerprint=fingerprint,
                     title=f"{exception_type}: {message}",
                     count=1,
+                    status="unresolved",
+                    is_regression=False,
                     first_seen=now,
                     last_seen=now,
                 )
@@ -88,6 +92,18 @@ class IngestionWorker:
                     set_={
                         "count": Issue.count + 1,
                         "last_seen": now,
+                        "status": case(
+                            (Issue.status == "resolved", "unresolved"),
+                            else_=Issue.status,
+                        ),
+                        "is_regression": case(
+                            (Issue.status == "resolved", True),
+                            else_=Issue.is_regression,
+                        ),
+                        "regressed_at": case(
+                            (Issue.status == "resolved", now),
+                            else_=Issue.regressed_at,
+                        ),
                     },
                 )
                 .returning(Issue.id, Issue.count)
