@@ -17,6 +17,11 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     return project
 
 
+@router.get("/projects", response_model=list[ProjectResponse])
+def list_projects(db: Session = Depends(get_db)):
+    return db.query(Project).order_by(Project.id.asc()).all()
+
+
 @router.get("/projects/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: int, db: Session = Depends(get_db)):
     project = db.get(Project, project_id)

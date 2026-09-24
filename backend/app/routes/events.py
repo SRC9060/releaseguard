@@ -97,3 +97,24 @@ def list_issues(project_id: int, db: Session = Depends(get_db)):
     )
 
     return issues
+
+
+@router.get(
+    "/projects/{project_id}/issues/{issue_id}",
+    response_model=IssueResponse,
+)
+def get_issue(project_id: int, issue_id: int, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    issue = (
+        db.query(Issue)
+        .filter(Issue.project_id == project_id, Issue.id == issue_id)
+        .first()
+    )
+    if issue is None:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    return issue
+
