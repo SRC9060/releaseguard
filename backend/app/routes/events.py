@@ -28,19 +28,14 @@ def ingest_event(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     fingerprint = make_fingerprint(payload.exception_type, payload.stack_trace)
 
-    issue = (
-        db.query(Issue)
-        .filter(
-            Issue.project_id == project_id,
-            Issue.fingerprint == fingerprint,
-        )
-        .first()
-    )
+    if db.bind.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as upsert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as upsert
 
-    created_new_issue = False
-
-    if issue is None:
-        issue = Issue(
+    stmt = (
+        upsert(Issue)
+        .values(
             project_id=project_id,
             fingerprint=fingerprint,
             title=f"{payload.exception_type}: {payload.message}",
@@ -48,16 +43,22 @@ def ingest_event(
             first_seen=now,
             last_seen=now,
         )
-        db.add(issue)
-        db.flush()
-        created_new_issue = True
-    else:
-        issue.count += 1
-        issue.last_seen = now
+        .on_conflict_do_update(
+            index_elements=["project_id", "fingerprint"],
+            set_={
+                "count": Issue.count + 1,
+                "last_seen": now,
+            },
+        )
+        .returning(Issue.id, Issue.count)
+    )
+    result = db.execute(stmt).one()
+    issue_id, issue_count = result[0], result[1]
+    created_new_issue = (issue_count == 1)
 
     event = ErrorEvent(
         project_id=project_id,
-        issue_id=issue.id,
+        issue_id=issue_id,
         exception_type=payload.exception_type,
         message=payload.message,
         stack_trace=payload.stack_trace,
@@ -65,16 +66,17 @@ def ingest_event(
         received_at=now,
     )
     db.add(event)
+    db.flush()
+    event_id = event.id
     db.commit()
-    db.refresh(event)
 
     return ErrorEventResponse(
-        event_id=event.id,
-        issue_id=issue.id,
-        fingerprint=issue.fingerprint,
-        issue_count=issue.count,
+        event_id=event_id,
+        issue_id=issue_id,
+        fingerprint=fingerprint,
+        issue_count=issue_count,
         created_new_issue=created_new_issue,
-        received_at=event.received_at,
+        received_at=now,
     )
 
 

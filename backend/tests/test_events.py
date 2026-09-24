@@ -1,3 +1,6 @@
+import concurrent.futures
+
+
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
@@ -190,3 +193,51 @@ def test_project_not_found(client):
     resp = client.get("/api/v1/projects/99999/issues")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Project not found"
+
+
+def test_concurrent_identical_error_events_create_single_issue(client):
+    # 1. Create project
+    project_resp = client.post("/api/v1/projects", json={"name": "Concurrency App"})
+    assert project_resp.status_code == 201
+    project_id = project_resp.json()["id"]
+
+    event_payload = {
+        "exception_type": "DatabaseConnectionTimeout",
+        "message": "Connection to replica pool timed out after 3000ms",
+        "stack_trace": "Traceback (most recent call last):\n  File \"db/pool.py:88:12\"\nTimeoutError",
+        "release": "2.0.0",
+    }
+
+    num_concurrent_requests = 100
+
+    def send_event(_):
+        return client.post(f"/api/v1/projects/{project_id}/events", json=event_payload)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        responses = list(executor.map(send_event, range(num_concurrent_requests)))
+
+    # 1. Verify all responses succeeded
+    status_codes = [r.status_code for r in responses]
+    assert all(code == 201 for code in status_codes), f"Not all requests returned 201: {status_codes}"
+
+    # 2. Verify all successful events point to that exact same issue
+    issue_ids = {r.json()["issue_id"] for r in responses}
+    assert len(issue_ids) == 1, f"Expected 1 unique issue ID, got: {issue_ids}"
+    shared_issue_id = issue_ids.pop()
+
+    # 3. Verify exactly one issue exists in the database
+    issues_resp = client.get(f"/api/v1/projects/{project_id}/issues")
+    assert issues_resp.status_code == 200
+    issues = issues_resp.json()
+
+    assert len(issues) == 1, "There must be exactly one issue row in the database"
+    issue = issues[0]
+    assert issue["id"] == shared_issue_id
+
+    # 4. Verify issue occurrence count equals the number of successful events
+    assert issue["count"] == num_concurrent_requests
+
+    # 5. Verify created_new_issue was True exactly once
+    new_issue_flags = [r.json()["created_new_issue"] for r in responses]
+    assert new_issue_flags.count(True) == 1
+    assert new_issue_flags.count(False) == num_concurrent_requests - 1
