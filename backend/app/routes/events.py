@@ -6,9 +6,58 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.fingerprint import make_fingerprint
 from app.models import ErrorEvent, Issue, Project
-from app.schemas import ErrorEventCreate, ErrorEventResponse, IssueResponse
+from app.queue import EventQueue, get_queue
+from app.schemas import (
+    BulkErrorEventsCreate,
+    BulkIngestResponse,
+    ErrorEventCreate,
+    ErrorEventResponse,
+    IssueResponse,
+)
 
 router = APIRouter(tags=["errors"])
+
+
+@router.post(
+    "/projects/{project_id}/events/bulk",
+    response_model=BulkIngestResponse,
+    status_code=202,
+)
+def ingest_events_bulk(
+    project_id: int,
+    payload: BulkErrorEventsCreate,
+    db: Session = Depends(get_db),
+    queue: EventQueue = Depends(get_queue),
+):
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    events_data = [e.model_dump() for e in payload.events]
+    batch_id, accepted_count = queue.enqueue_events(project_id, events_data)
+
+    return BulkIngestResponse(
+        status="accepted",
+        accepted_count=accepted_count,
+        rejected_count=0,
+        batch_id=batch_id,
+        project_id=project_id,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/queue/stats",
+)
+def get_queue_stats(
+    project_id: int,
+    db: Session = Depends(get_db),
+    queue: EventQueue = Depends(get_queue),
+):
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return queue.get_metrics()
 
 
 @router.post(
@@ -57,6 +106,7 @@ def ingest_event(
     created_new_issue = (issue_count == 1)
 
     event = ErrorEvent(
+        event_id=payload.event_id,
         project_id=project_id,
         issue_id=issue_id,
         exception_type=payload.exception_type,

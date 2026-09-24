@@ -38,6 +38,7 @@ class ErrorEvent(Base):
     __tablename__ = "error_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     issue_id: Mapped[int] = mapped_column(ForeignKey("issues.id"), nullable=False)
     exception_type: Mapped[str] = mapped_column(String(200), nullable=False)

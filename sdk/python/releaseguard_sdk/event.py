@@ -2,9 +2,10 @@
 Event data model and extraction helpers for ReleaseGuard SDK.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import sys
 import traceback
+import uuid
 
 
 @dataclass
@@ -13,9 +14,11 @@ class Event:
     message: str
     stack_trace: str
     release: str | None = None
+    event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def to_dict(self) -> dict:
         return {
+            "event_id": self.event_id,
             "exception_type": self.exception_type,
             "message": self.message,
             "stack_trace": self.stack_trace,

@@ -37,8 +37,31 @@ class AppTestClientTransport(BaseTransport):
         else:
             raise TransientTransportError(f"HTTP {resp.status_code}: {resp.text}")
 
+    def send_batch(self, events: list[Event]) -> dict[str, Any]:
+        resp = self.test_client.post(
+            f"/api/v1/projects/{self.project_id}/events/bulk",
+            json={"events": [e.to_dict() for e in events]},
+        )
+        if resp.status_code in (200, 201, 202):
+            return resp.json()
+        elif 400 <= resp.status_code < 500:
+            raise PermanentClientError(f"HTTP {resp.status_code}: {resp.text}")
+        else:
+            raise TransientTransportError(f"HTTP {resp.status_code}: {resp.text}")
 
-def test_requirement_i_sdk_groups_repeated_identical_exceptions_into_single_issue(client):
+
+@pytest.fixture
+def override_test_queue():
+    import fakeredis
+    from app.queue import EventQueue, get_queue
+    fake_client = fakeredis.FakeRedis(decode_responses=True)
+    test_queue = EventQueue(redis_client=fake_client)
+    app.dependency_overrides[get_queue] = lambda: test_queue
+    yield test_queue
+    app.dependency_overrides.pop(get_queue, None)
+
+
+def test_requirement_i_sdk_groups_repeated_identical_exceptions_into_single_issue(client, override_test_queue):
     """
     Requirement I: 100 identical exceptions captured via the SDK must result
     in exactly 1 issue with count = 100 in ReleaseGuard backend.
@@ -73,6 +96,14 @@ def test_requirement_i_sdk_groups_repeated_identical_exceptions_into_single_issu
     # 4. Flush the background worker
     flushed = releaseguard_sdk.flush(timeout=5.0)
     assert flushed is True
+
+    # 4b. Run server-side IngestionWorker to process Redis stream events into PostgreSQL
+    from app.worker import IngestionWorker
+    server_worker = IngestionWorker(queue=override_test_queue)
+    while True:
+        processed = server_worker.process_next_batch(batch_size=50)
+        if processed == 0:
+            break
 
     # 5. Verify SDK counters
     stats = sdk_client.stats

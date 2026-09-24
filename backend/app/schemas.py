@@ -14,11 +14,27 @@ class ProjectResponse(BaseModel):
     name: str
 
 
+import uuid
+
+
 class ErrorEventCreate(BaseModel):
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     exception_type: str
     message: str
     stack_trace: str
     release: str | None = None
+
+
+class BulkErrorEventsCreate(BaseModel):
+    events: list[ErrorEventCreate] = Field(..., min_length=1, max_length=500)
+
+
+class BulkIngestResponse(BaseModel):
+    status: str = "accepted"
+    accepted_count: int
+    rejected_count: int = 0
+    batch_id: str
+    project_id: int
 
 
 class ErrorEventResponse(BaseModel):

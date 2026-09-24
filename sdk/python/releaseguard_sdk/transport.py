@@ -1,13 +1,14 @@
 """
 HTTP Transport implementation for ReleaseGuard SDK.
 Uses standard-library urllib to maintain zero external dependencies.
+Supports both bulk ingestion and single-event endpoints.
 """
 
 from abc import ABC, abstractmethod
 import json
+from typing import Any
 import urllib.error
 import urllib.request
-from typing import Any
 
 from releaseguard_sdk.config import Config
 from releaseguard_sdk.event import Event
@@ -30,23 +31,39 @@ class BaseTransport(ABC):
     def send_event(self, event: Event) -> dict[str, Any]:
         """Send a single event."""
 
+    def send_batch(self, events: list[Event]) -> dict[str, Any]:
+        """Send a batch of events. Defaults to sending each event individually."""
+        res: dict[str, Any] = {}
+        for event in events:
+            res = self.send_event(event)
+        return res
+
 
 class HttpTransport(BaseTransport):
     def __init__(self, config: Config):
         self.config = config
-        self.endpoint = f"{config.base_url}/api/v1/projects/{config.project_id}/events"
+        base = config.base_url.rstrip("/")
+        self.single_endpoint = f"{base}/api/v1/projects/{config.project_id}/events"
+        self.bulk_endpoint = f"{base}/api/v1/projects/{config.project_id}/events/bulk"
 
     def send_event(self, event: Event) -> dict[str, Any]:
-        data = json.dumps(event.to_dict()).encode("utf-8")
+        return self._send_request(self.single_endpoint, event.to_dict())
+
+    def send_batch(self, events: list[Event]) -> dict[str, Any]:
+        payload = {"events": [e.to_dict() for e in events]}
+        return self._send_request(self.bulk_endpoint, payload)
+
+    def _send_request(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "releaseguard-python-sdk/0.1.0",
+            "User-Agent": "releaseguard-python-sdk/0.2.0",
         }
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
         req = urllib.request.Request(
-            url=self.endpoint,
+            url=url,
             data=data,
             headers=headers,
             method="POST",
@@ -73,7 +90,7 @@ class HttpTransport(BaseTransport):
                 ) from http_err
         except (urllib.error.URLError, TimeoutError, OSError) as net_err:
             raise TransientTransportError(
-                f"Network failure connecting to {self.endpoint}: {net_err}"
+                f"Network failure connecting to {url}: {net_err}"
             ) from net_err
         except Exception as unexpected:
             raise TransientTransportError(

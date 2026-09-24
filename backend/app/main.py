@@ -15,7 +15,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from sqlalchemy import text
+
 Base.metadata.create_all(bind=engine)
+
+if engine.dialect.name == "postgresql":
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE error_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(36);"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_error_events_event_id ON error_events (event_id);"))
 
 app.include_router(projects_router, prefix="/api/v1")
 app.include_router(events_router, prefix="/api/v1")

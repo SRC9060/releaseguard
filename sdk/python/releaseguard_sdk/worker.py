@@ -131,35 +131,89 @@ class BackgroundWorker:
                     logger.error("Unhandled worker error sending event: %s", unhandled)
                 return False
 
+    def _send_batch_with_retry(self, batch: List[Event]) -> bool:
+        """
+        Sends a batch of events with exponential backoff for transient errors.
+        Permanent client errors (4xx) are discarded immediately without retry.
+        """
+        count = len(batch)
+        for attempt in range(self.config.max_retries + 1):
+            if self._shutdown_event.is_set():
+                break
+
+            try:
+                self.transport.send_batch(batch)
+                self.stats.sent += count
+                if self.config.debug:
+                    logger.debug("Successfully sent batch of %d events", count)
+                return True
+            except PermanentClientError as p_err:
+                self.stats.failed += count
+                if self.config.debug:
+                    logger.warning("Permanent client error sending batch: %s", p_err)
+                return False
+            except TransientTransportError as t_err:
+                if attempt < self.config.max_retries:
+                    backoff = self.config.retry_backoff * (2**attempt)
+                    if self.config.debug:
+                        logger.debug(
+                            "Transient transport error (%s). Retrying batch in %.2fs (attempt %d/%d)",
+                            t_err,
+                            backoff,
+                            attempt + 1,
+                            self.config.max_retries,
+                        )
+                    self._shutdown_event.wait(timeout=backoff)
+                else:
+                    self.stats.failed += count
+                    if self.config.debug:
+                        logger.error(
+                            "Exhausted retries sending batch of %d events: %s",
+                            count,
+                            t_err,
+                        )
+                    return False
+            except Exception as unhandled:
+                self.stats.failed += count
+                if self.config.debug:
+                    logger.error("Unhandled worker error sending batch: %s", unhandled)
+                return False
+
         return False
 
     def _run(self) -> None:
         """
         Main worker execution loop.
-        Collects events from the queue and transmits them with configurable flush intervals.
+        Collects events from the queue and transmits them in batches.
         """
         while not self._shutdown_event.is_set():
             batch = self._collect_batch()
-            for event in batch:
-                try:
-                    self._send_with_retry(event)
-                finally:
+            if not batch:
+                continue
+            try:
+                self._send_batch_with_retry(batch)
+            finally:
+                for _ in batch:
                     self._queue.task_done()
 
         # Drain remaining events on shutdown
+        drain_batch: List[Event] = []
         while not self._queue.empty():
             try:
                 event = self._queue.get_nowait()
-                try:
-                    # Best-effort transmission without long retry loops on shutdown
-                    self.transport.send_event(event)
-                    self.stats.sent += 1
-                except Exception:
-                    self.stats.failed += 1
-                finally:
-                    self._queue.task_done()
+                drain_batch.append(event)
             except queue.Empty:
                 break
+
+        if drain_batch:
+            try:
+                self.transport.send_batch(drain_batch)
+                self.stats.sent += len(drain_batch)
+            except Exception:
+                self.stats.failed += len(drain_batch)
+            finally:
+                for _ in drain_batch:
+                    self._queue.task_done()
 
     def _collect_batch(self) -> List[Event]:
         """

@@ -246,3 +246,90 @@ def test_requirement_h_shutdown_stops_worker_cleanly():
     # Subsequent enqueue must be rejected safely
     event = Event("LateError", "after shutdown", "")
     assert client.worker.enqueue(event) is False
+
+
+class MockBatchTransport(BaseTransport):
+    def __init__(self):
+        self.batches: list[list[Event]] = []
+        self.sent_events: list[Event] = []
+
+    def send_event(self, event: Event) -> dict[str, Any]:
+        self.sent_events.append(event)
+        return {"status": "ok"}
+
+    def send_batch(self, events: list[Event]) -> dict[str, Any]:
+        self.batches.append(events)
+        self.sent_events.extend(events)
+        return {"status": "accepted", "accepted_count": len(events)}
+
+
+def test_sdk_batch_transmission():
+    """Validates that SDK worker flushes events in batches to bulk endpoint."""
+    transport = MockBatchTransport()
+    config = Config(project_id=1, batch_size=5, flush_interval=0.05)
+    client = ReleaseGuardClient(config=config, transport=transport)
+
+    for i in range(10):
+        client.capture_message(f"Test message {i}")
+
+    client.flush(timeout=1.0)
+    assert len(transport.sent_events) == 10
+    assert len(transport.batches) >= 2
+    assert client.stats.sent == 10
+    client.shutdown(timeout=0.5)
+
+
+def test_sdk_event_id_generated_once_and_stable():
+    """Verify event_id is generated once and remains stable across serializations."""
+    event = None
+    try:
+        raise ValueError("Testing event_id stability")
+    except ValueError:
+        event = build_event_from_exc(release="1.0.0")
+
+    assert event is not None
+    assert event.event_id is not None
+    assert len(event.event_id) >= 32
+
+    # Multiple to_dict() calls must yield identical event_id
+    dict1 = event.to_dict()
+    dict2 = event.to_dict()
+    assert dict1["event_id"] == event.event_id
+    assert dict2["event_id"] == event.event_id
+
+
+def test_sdk_retry_preserves_event_id():
+    """Verify that retrying transport sends the exact same event_id without re-generating."""
+    class FailOnceBatchTransport(BaseTransport):
+        def __init__(self):
+            self.attempts = 0
+            self.delivered_event_ids = []
+
+        def send_event(self, event: Event) -> dict[str, Any]:
+            return {}
+
+        def send_batch(self, events: list[Event]) -> dict[str, Any]:
+            self.attempts += 1
+            # Record the event_ids sent in this batch attempt
+            self.delivered_event_ids.append([e.event_id for e in events])
+            if self.attempts == 1:
+                raise TransientTransportError("503 Service Temporarily Unavailable")
+            return {"status": "accepted", "accepted_count": len(events)}
+
+    transport = FailOnceBatchTransport()
+    config = Config(project_id=1, max_retries=2, retry_backoff=0.01, flush_interval=0.01)
+    client = ReleaseGuardClient(config=config, transport=transport)
+
+    try:
+        raise RuntimeError("Transient failure with stable ID")
+    except RuntimeError:
+        client.capture_exception()
+
+    client.flush(timeout=1.0)
+    assert transport.attempts == 2
+    # Verify both attempts contained the EXACT same event_id
+    attempt_1_ids = transport.delivered_event_ids[0]
+    attempt_2_ids = transport.delivered_event_ids[1]
+    assert attempt_1_ids == attempt_2_ids
+    assert len(attempt_1_ids) == 1
+    client.shutdown(timeout=0.5)
