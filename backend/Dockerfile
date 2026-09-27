@@ -21,13 +21,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application and Alembic files
 COPY . .
+RUN chmod +x start.sh
 
 # Run as non-privileged user
 RUN useradd -u 1000 -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8000 10000
 
-# Default command starts the API service.
-# For worker deployment, override CMD with ["python", "-m", "app.worker"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Default command executes migration, background worker, and FastAPI server
+CMD ["./start.sh"]
