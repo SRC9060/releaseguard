@@ -124,17 +124,49 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+  updateTenant: (tenantId, name) =>
+    request(`/api/v1/tenants/${tenantId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
   getTenantMembers: (tenantId) => request(`/api/v1/tenants/${tenantId}/members`),
+  updateMemberRole: (tenantId, userId, role) =>
+    request(`/api/v1/tenants/${tenantId}/members/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    }),
+  removeMember: (tenantId, userId) =>
+    request(`/api/v1/tenants/${tenantId}/members/${userId}`, {
+      method: 'DELETE',
+    }),
+  createInvite: (tenantId, email, role = 'member') =>
+    request(`/api/v1/tenants/${tenantId}/invites`, {
+      method: 'POST',
+      body: JSON.stringify({ email, role }),
+    }),
 
   // Tenant-Scoped Projects
   getTenantProjects: (tenantId) => request(`/api/v1/tenants/${tenantId}/projects`),
   getTenantProject: (tenantId, projectId) =>
     request(`/api/v1/tenants/${tenantId}/projects/${projectId}`),
+  getProjectKey: (tenantId, projectId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/key`),
   createTenantProject: (tenantId, name) =>
     request(`/api/v1/tenants/${tenantId}/projects`, {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+  updateTenantProject: (tenantId, projectId, name) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+  sendProjectTestEvent: (tenantId, projectId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/test-event`, {
+      method: 'POST',
+    }),
+  getProjectTestEvent: (tenantId, projectId, eventId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/test-event/${eventId}`),
 
   // Tenant-Scoped Issues
   getTenantIssues: (tenantId, projectId, status = null) => {

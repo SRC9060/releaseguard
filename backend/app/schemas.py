@@ -59,6 +59,10 @@ class TenantCreate(BaseModel):
     slug: str | None = Field(default=None, max_length=100)
 
 
+class TenantUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
 class MembershipResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -106,6 +110,10 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
+class ProjectUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
 class ProjectResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,6 +121,23 @@ class ProjectResponse(BaseModel):
     name: str
     tenant_id: int | None = None
     api_key: str | None = None
+    issues_count: int | None = None
+    releases_count: int | None = None
+    environments_count: int | None = None
+    recent_release: str | None = None
+
+
+class ProjectKeyResponse(BaseModel):
+    project_id: int
+    api_key: str
+
+
+class TestEventResponse(BaseModel):
+    status: str
+    event_id: str
+    issue_id: int | None = None
+    timestamp: str | None = None
+    message: str
 
 
 # =========================================================================

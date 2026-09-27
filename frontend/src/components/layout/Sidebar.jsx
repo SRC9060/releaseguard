@@ -22,8 +22,8 @@ const NAV_ITEMS = [
   { name: 'Releases', path: '/releases', icon: GitBranch, isFunctional: true },
   { name: 'Feature Flags', path: '/feature-flags', icon: Sliders, isFunctional: true },
   { name: 'Incidents', path: '/incidents', icon: Flame, isFunctional: true },
-  { name: 'Projects', path: '/projects', icon: FolderGit2, isFunctional: false },
-  { name: 'Settings', path: '/settings', icon: Settings, isFunctional: false },
+  { name: 'Projects', path: '/projects', icon: FolderGit2, isFunctional: true },
+  { name: 'Settings', path: '/settings', icon: Settings, isFunctional: true },
 ];
 
 export function Sidebar({ mobileOpen, onCloseMobile }) {

@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -11,7 +13,19 @@ from app.auth import (
     hash_token,
 )
 from app.db import get_db
-from app.models import ErrorEvent, Issue, Membership, Project, Tenant, TenantInvite, User
+from app.fingerprint import make_fingerprint
+from app.models import (
+    Environment,
+    ErrorEvent,
+    Issue,
+    Membership,
+    Project,
+    Release,
+    Tenant,
+    TenantInvite,
+    User,
+)
+from app.queue import EventQueue, get_queue
 from app.routes.auth import generate_unique_slug
 from app.routes.events import compute_timeseries
 from app.schemas import (
@@ -23,9 +37,13 @@ from app.schemas import (
     MembershipUpdate,
     PaginatedEventsResponse,
     ProjectCreate,
+    ProjectKeyResponse,
     ProjectResponse,
+    ProjectUpdate,
     TenantCreate,
     TenantResponse,
+    TenantUpdate,
+    TestEventResponse,
     TimeSeriesResponse,
 )
 
@@ -169,6 +187,29 @@ def get_tenant(
     db: Session = Depends(get_db),
 ):
     tenant, membership = get_tenant_membership_or_404(tenant_id, current_user, db)
+    return TenantResponse(
+        id=tenant.id,
+        name=tenant.name,
+        slug=tenant.slug,
+        role=membership.role,
+        created_at=tenant.created_at,
+    )
+
+
+@router.patch(
+    "/tenants/{tenant_id}",
+    response_model=TenantResponse,
+)
+def update_tenant(
+    tenant_id: int,
+    payload: TenantUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    tenant, membership = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="admin")
+    tenant.name = payload.name.strip()
+    db.commit()
+    db.refresh(tenant)
     return TenantResponse(
         id=tenant.id,
         name=tenant.name,
@@ -407,6 +448,35 @@ def accept_invite(
 # 4. Tenant-Scoped Projects API
 # =========================================================================
 
+def _enrich_project(project: Project, db: Session, caller_role: str = "member") -> ProjectResponse:
+    issues_cnt = db.query(func.count(Issue.id)).filter(Issue.project_id == project.id).scalar() or 0
+    releases_cnt = db.query(func.count(Release.id)).filter(Release.project_id == project.id).scalar() or 0
+    envs_cnt = db.query(func.count(Environment.id)).filter(Environment.project_id == project.id).scalar() or 0
+    recent_rel = (
+        db.query(Release.version)
+        .filter(Release.project_id == project.id)
+        .order_by(Release.created_at.desc())
+        .first()
+    )
+
+    api_key_val = project.api_key
+    if api_key_val and caller_role not in ("owner", "admin"):
+        # Mask the key for regular members: members never receive plaintext keys in responses
+        prefix = api_key_val[:8] if len(api_key_val) >= 8 else "rg_live_"
+        api_key_val = f"{prefix}{'•' * 24}"
+
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        tenant_id=project.tenant_id,
+        api_key=api_key_val,
+        issues_count=issues_cnt,
+        releases_count=releases_cnt,
+        environments_count=envs_cnt,
+        recent_release=recent_rel[0] if recent_rel else None,
+    )
+
+
 @router.post(
     "/tenants/{tenant_id}/projects",
     response_model=ProjectResponse,
@@ -419,7 +489,7 @@ def create_tenant_project(
     db: Session = Depends(get_db),
 ):
     # Creating a project requires at least admin or owner role in the tenant
-    tenant, _ = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="admin")
+    tenant, membership = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="admin")
 
     project = Project(
         name=payload.name.strip(),
@@ -429,7 +499,7 @@ def create_tenant_project(
     db.commit()
     db.refresh(project)
 
-    return project
+    return _enrich_project(project, db, caller_role=membership.role)
 
 
 @router.get(
@@ -443,7 +513,7 @@ def list_tenant_projects(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    get_tenant_membership_or_404(tenant_id, current_user, db, min_role="member")
+    _, membership = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="member")
     projects = (
         db.query(Project)
         .filter(Project.tenant_id == tenant_id)
@@ -452,7 +522,7 @@ def list_tenant_projects(
         .limit(limit)
         .all()
     )
-    return projects
+    return [_enrich_project(p, db, caller_role=membership.role) for p in projects]
 
 
 @router.get(
@@ -465,8 +535,129 @@ def get_tenant_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    _, membership = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="member")
     _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db)
-    return project
+    return _enrich_project(project, db, caller_role=membership.role)
+
+
+@router.get(
+    "/tenants/{tenant_id}/projects/{project_id}/key",
+    response_model=ProjectKeyResponse,
+)
+def get_tenant_project_key(
+    tenant_id: int,
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves the raw ingestion credential for a project.
+    Strictly restricted to tenant owners and admins.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+    return ProjectKeyResponse(project_id=project.id, api_key=project.api_key or "")
+
+
+@router.patch(
+    "/tenants/{tenant_id}/projects/{project_id}",
+    response_model=ProjectResponse,
+)
+def update_tenant_project(
+    tenant_id: int,
+    project_id: int,
+    payload: ProjectUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _, membership = get_tenant_membership_or_404(tenant_id, current_user, db, min_role="admin")
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+    project.name = payload.name.strip()
+    db.commit()
+    db.refresh(project)
+    return _enrich_project(project, db, caller_role=membership.role)
+
+
+@router.post(
+    "/tenants/{tenant_id}/projects/{project_id}/test-event",
+    response_model=TestEventResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def send_project_test_event(
+    tenant_id: int,
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    queue: EventQueue = Depends(get_queue),
+):
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+
+    event_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    exception_type = "ReleaseGuardVerificationEvent"
+    message = "Integration verification test event successfully received."
+    stack_trace = (
+        'Traceback (most recent call last):\n'
+        '  File "releaseguard_onboarding.py", line 12, in verify_pipeline\n'
+        '    raise ReleaseGuardVerificationEvent("Test event successfully captured.")\n'
+        'ReleaseGuardVerificationEvent: Test event successfully captured.'
+    )
+    release = "v0.1-onboarding"
+
+    try:
+        queue.enqueue_events(project.id, [{
+            "event_id": event_id,
+            "exception_type": exception_type,
+            "message": message,
+            "stack_trace": stack_trace,
+            "release": release,
+        }])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Redis ingestion queue unavailable",
+        )
+
+    return TestEventResponse(
+        status="pending",
+        event_id=event_id,
+        issue_id=None,
+        timestamp=now.isoformat(),
+        message="Verification event enqueued for worker processing",
+    )
+
+
+@router.get(
+    "/tenants/{tenant_id}/projects/{project_id}/test-event/{event_id}",
+    response_model=TestEventResponse,
+)
+def get_project_test_event(
+    tenant_id: int,
+    project_id: int,
+    event_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+    error_event = (
+        db.query(ErrorEvent)
+        .filter(ErrorEvent.event_id == event_id, ErrorEvent.project_id == project.id)
+        .first()
+    )
+    if error_event is None:
+        return TestEventResponse(
+            status="pending",
+            event_id=event_id,
+            issue_id=None,
+            timestamp=None,
+            message="Event is queued for worker processing",
+        )
+    return TestEventResponse(
+        status="completed",
+        event_id=event_id,
+        issue_id=error_event.issue_id,
+        timestamp=error_event.received_at.isoformat(),
+        message="Integration connected successfully",
+    )
 
 
 # =========================================================================

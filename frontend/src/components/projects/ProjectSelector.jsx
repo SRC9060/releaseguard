@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ChevronDown, Check, Plus, Folder, Loader2 } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import CreateProjectModal from './CreateProjectModal';
 
 export function ProjectSelector() {
+  const navigate = useNavigate();
   const { projects, selectedProject, selectProject, isLoading } = useProject();
   const [isOpen, setIsOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -93,7 +95,19 @@ export function ProjectSelector() {
               )}
             </div>
 
-            <div className="p-1.5 border-t border-zinc-800/80 bg-zinc-950/40">
+            <div className="p-1.5 border-t border-zinc-800/80 bg-zinc-950/40 space-y-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsOpen(false);
+                  navigate('/projects');
+                }}
+                className="w-full flex items-center justify-between px-3 py-1.5 text-xs text-zinc-300 hover:text-white hover:bg-zinc-800/60 rounded-lg transition"
+              >
+                <span>Manage All Projects</span>
+                <span className="text-[10px] text-zinc-500 font-mono">→</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {

@@ -10,6 +10,9 @@ import ReleasesPage from './pages/ReleasesPage';
 import FeatureFlagsPage from './pages/FeatureFlagsPage';
 import IncidentsPage from './pages/IncidentsPage';
 import IncidentDetailPage from './pages/IncidentDetailPage';
+import ProjectsPage from './pages/ProjectsPage';
+import ProjectDetailPage from './pages/ProjectDetailPage';
+import SettingsPage from './pages/SettingsPage';
 import ComingSoonPage from './pages/ComingSoonPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -98,27 +101,14 @@ function App() {
             <Route path="/incidents" element={<IncidentsPage />} />
             <Route path="/incidents/:id" element={<IncidentDetailPage />} />
 
-            {/* Coming Soon Sections */}
+            {/* Projects & Settings */}
+            <Route path="/projects" element={<ProjectsPage />} />
+            <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
             <Route
-              path="/projects"
-              element={
-                <ComingSoonPage
-                  title="Project Management"
-                  description="Manage API ingest keys, team access permissions, and data retention rules across your organizations."
-                  roadmapVersion="v0.2"
-                />
-              }
+              path="/projects/:projectId/integration"
+              element={<ProjectDetailPage />}
             />
-            <Route
-              path="/settings"
-              element={
-                <ComingSoonPage
-                  title="Settings & Integrations"
-                  description="Configure webhook integrations, alerts, security policies, and environment definitions."
-                  roadmapVersion="v0.2"
-                />
-              }
-            />
+            <Route path="/settings" element={<SettingsPage />} />
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
