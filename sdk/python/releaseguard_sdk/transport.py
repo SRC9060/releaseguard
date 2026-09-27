@@ -38,6 +38,15 @@ class BaseTransport(ABC):
             res = self.send_event(event)
         return res
 
+    def get_config(
+        self,
+        environment: str,
+        etag: str | None = None,
+        user_id: str | None = None,
+    ) -> tuple[int, dict[str, Any], str | None]:
+        """Fetch remote configuration document. Returns (status_code, document_dict, etag)."""
+        return 200, {}, None
+
 
 class HttpTransport(BaseTransport):
     def __init__(self, config: Config):
@@ -45,6 +54,40 @@ class HttpTransport(BaseTransport):
         base = config.base_url.rstrip("/")
         self.single_endpoint = f"{base}/api/v1/projects/{config.project_id}/events"
         self.bulk_endpoint = f"{base}/api/v1/projects/{config.project_id}/events/bulk"
+
+    def get_config(
+        self,
+        environment: str,
+        etag: str | None = None,
+        user_id: str | None = None,
+    ) -> tuple[int, dict[str, Any], str | None]:
+        base = self.config.base_url.rstrip("/")
+        url = f"{base}/api/v1/config/{self.config.project_id}/{environment}"
+        if user_id:
+            import urllib.parse
+            url += f"?user_id={urllib.parse.quote(str(user_id))}"
+
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "releaseguard-python-sdk/0.2.0",
+        }
+        if self.config.api_key:
+            headers["X-ReleaseGuard-Key"] = self.config.api_key
+        if etag:
+            headers["If-None-Match"] = etag
+
+        req = urllib.request.Request(url=url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout) as resp:
+                resp_etag = resp.headers.get("ETag")
+                body = resp.read().decode("utf-8")
+                return 200, json.loads(body) if body else {}, resp_etag
+        except urllib.error.HTTPError as err:
+            if err.code == 304:
+                return 304, {}, etag
+            return err.code, {}, None
+        except Exception:
+            return 500, {}, None
 
     def send_event(self, event: Event) -> dict[str, Any]:
         return self._send_request(self.single_endpoint, event.to_dict())

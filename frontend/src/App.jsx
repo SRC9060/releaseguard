@@ -6,6 +6,8 @@ import AppShell from './components/layout/AppShell';
 import OverviewPage from './pages/OverviewPage';
 import IssuesPage from './pages/IssuesPage';
 import IssueDetailPage from './pages/IssueDetailPage';
+import ReleasesPage from './pages/ReleasesPage';
+import FeatureFlagsPage from './pages/FeatureFlagsPage';
 import ComingSoonPage from './pages/ComingSoonPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -87,27 +89,12 @@ function App() {
             <Route path="/issues" element={<IssuesPage key={eventTriggerKey} />} />
             <Route path="/issues/:id" element={<IssueDetailPage />} />
 
+            {/* Active Releases & Feature Flags */}
+            <Route path="/releases" element={<ReleasesPage />} />
+            <Route path="/feature-flags" element={<FeatureFlagsPage />} />
+            <Route path="/flags" element={<Navigate to="/feature-flags" replace />} />
+
             {/* Coming Soon Sections */}
-            <Route
-              path="/releases"
-              element={
-                <ComingSoonPage
-                  title="Release Tracking"
-                  description="Track production deploy regressions, compare error velocity across git commits, and monitor release health."
-                  roadmapVersion="v0.2"
-                />
-              }
-            />
-            <Route
-              path="/feature-flags"
-              element={
-                <ComingSoonPage
-                  title="Deterministic Feature Flags"
-                  description="Safely roll out features with automatic kill-switches tied directly to real-time error rate thresholds."
-                  roadmapVersion="v0.2"
-                />
-              }
-            />
             <Route
               path="/incidents"
               element={

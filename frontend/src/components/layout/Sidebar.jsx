@@ -18,8 +18,8 @@ import api from '../../services/api';
 const NAV_ITEMS = [
   { name: 'Overview', path: '/', icon: LayoutDashboard, isFunctional: true },
   { name: 'Issues', path: '/issues', icon: AlertOctagon, isFunctional: true },
-  { name: 'Releases', path: '/releases', icon: GitBranch, isFunctional: false },
-  { name: 'Feature Flags', path: '/feature-flags', icon: Sliders, isFunctional: false },
+  { name: 'Releases', path: '/releases', icon: GitBranch, isFunctional: true },
+  { name: 'Feature Flags', path: '/feature-flags', icon: Sliders, isFunctional: true },
   { name: 'Incidents', path: '/incidents', icon: Flame, isFunctional: false },
   { name: 'Projects', path: '/projects', icon: FolderGit2, isFunctional: false },
   { name: 'Settings', path: '/settings', icon: Settings, isFunctional: false },

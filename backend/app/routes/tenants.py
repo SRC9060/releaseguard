@@ -641,3 +641,53 @@ def get_tenant_project_timeseries(
 ):
     _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db)
     return compute_timeseries(db, project.id, issue_id=None, time_range=range)
+
+
+@router.get(
+    "/tenants/{tenant_id}/projects/{project_id}/issues/{issue_id}/releases",
+)
+def get_issue_releases(
+    tenant_id: int,
+    project_id: int,
+    issue_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Exposes release correlation for an issue based on real ErrorEvent data:
+    - affected release(s)
+    - first-seen release
+    - most recent release
+    """
+    _, _, issue = get_tenant_issue_or_404(tenant_id, project_id, issue_id, current_user, db)
+
+    release_rows = (
+        db.query(ErrorEvent.release)
+        .filter(ErrorEvent.issue_id == issue.id, ErrorEvent.release.isnot(None))
+        .distinct()
+        .all()
+    )
+    affected = [r[0] for r in release_rows if r[0]]
+
+    first_event = (
+        db.query(ErrorEvent.release)
+        .filter(ErrorEvent.issue_id == issue.id, ErrorEvent.release.isnot(None))
+        .order_by(ErrorEvent.received_at.asc(), ErrorEvent.id.asc())
+        .first()
+    )
+    first_seen_release = first_event[0] if first_event else None
+
+    latest_event = (
+        db.query(ErrorEvent.release)
+        .filter(ErrorEvent.issue_id == issue.id, ErrorEvent.release.isnot(None))
+        .order_by(ErrorEvent.received_at.desc(), ErrorEvent.id.desc())
+        .first()
+    )
+    latest_release = latest_event[0] if latest_event else None
+
+    return {
+        "issue_id": issue.id,
+        "affected_releases": affected,
+        "first_seen_release": first_seen_release,
+        "latest_release": latest_release,
+    }

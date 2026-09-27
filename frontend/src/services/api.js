@@ -161,6 +161,89 @@ export const api = {
       `/api/v1/tenants/${tenantId}/projects/${projectId}/metrics/timeseries?range=${encodeURIComponent(range)}`
     ),
 
+  // Issue Releases Correlation
+  getIssueReleases: (tenantId, projectId, issueId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/issues/${issueId}/releases`),
+
+  // Releases
+  getReleases: (tenantId, projectId, environment = null) => {
+    const query = environment ? `?environment=${encodeURIComponent(environment)}` : '';
+    return request(`/api/v1/tenants/${tenantId}/projects/${projectId}/releases${query}`);
+  },
+  createRelease: (tenantId, projectId, releaseData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/releases`, {
+      method: 'POST',
+      body: JSON.stringify(releaseData),
+    }),
+  getRelease: (tenantId, projectId, releaseId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/releases/${releaseId}`),
+
+  // Feature Flags
+  getEnvironments: (tenantId, projectId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/environments`),
+  createEnvironment: (tenantId, projectId, envData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/environments`, {
+      method: 'POST',
+      body: JSON.stringify(envData),
+    }),
+  getFeatureFlags: (tenantId, projectId, includeArchived = false) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/flags?include_archived=${includeArchived}`
+    ),
+  getFeatureFlag: (tenantId, projectId, flagId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}`),
+  createFeatureFlag: (tenantId, projectId, flagData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/flags`, {
+      method: 'POST',
+      body: JSON.stringify(flagData),
+    }),
+  updateFeatureFlag: (tenantId, projectId, flagId, flagData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}`, {
+      method: 'PUT',
+      body: JSON.stringify(flagData),
+    }),
+  archiveFeatureFlag: (tenantId, projectId, flagId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}`, {
+      method: 'DELETE',
+    }),
+  updateFlagSetting: (tenantId, projectId, flagId, environmentId, settingData) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}/environments/${environmentId}/setting`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(settingData),
+      }
+    ),
+  updateFlagRollout: (tenantId, projectId, flagId, environmentId, rolloutData) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}/environments/${environmentId}/rollout`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(rolloutData),
+      }
+    ),
+  setFlagRules: (tenantId, projectId, flagId, environmentId, rules) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}/environments/${environmentId}/rules`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(rules),
+      }
+    ),
+  killFlag: (tenantId, projectId, flagId, environmentId) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}/environments/${environmentId}/kill`,
+      {
+        method: 'POST',
+      }
+    ),
+  getFlagAuditLogs: (tenantId, projectId, flagId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/flags/${flagId}/audit-logs`),
+  getConfigDocument: (projectIdentifier, environmentKey, userId = null) => {
+    const query = userId ? `?user_id=${encodeURIComponent(userId)}` : '';
+    return request(`/api/v1/config/${projectIdentifier}/${environmentKey}${query}`);
+  },
+
   // Legacy fallback routes (for unauthenticated prototype tests)
   getProjects: () => request('/api/v1/projects'),
   getProject: (projectId) => request(`/api/v1/projects/${projectId}`),

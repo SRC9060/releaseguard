@@ -21,6 +21,8 @@ __all__ = [
     "flush",
     "shutdown",
     "get_client",
+    "get_flag",
+    "get_flag_variant",
     "ReleaseGuardClient",
     "Config",
     "Event",
@@ -118,3 +120,31 @@ def shutdown(timeout: float | None = 2.0) -> None:
     if _global_client is not None:
         _global_client.shutdown(timeout=timeout)
         _global_client = None
+
+
+def get_flag(
+    key: str,
+    user_id: str | None = None,
+    environment: str = "production",
+    default: Any = False,
+) -> Any:
+    """
+    Evaluates a feature flag locally using cached environment configuration.
+    """
+    if _global_client is not None:
+        return _global_client.get_flag(key=key, user_id=user_id, environment=environment, default=default)
+    return default
+
+
+def get_flag_variant(
+    key: str,
+    user_id: str | None = None,
+    environment: str = "production",
+    default: str = "off",
+) -> str:
+    """
+    Returns the evaluated variant string for a flag.
+    """
+    if _global_client is not None:
+        return _global_client.get_flag_variant(key=key, user_id=user_id, environment=environment, default=default)
+    return default

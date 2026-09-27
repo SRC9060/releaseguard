@@ -71,6 +71,10 @@ export function IssueDetailPage() {
   const [copiedEventId, setCopiedEventId] = useState(false);
   const [copiedStackTrace, setCopiedStackTrace] = useState(false);
 
+  // Issue Releases Correlation (Phase 8)
+  const [issueReleases, setIssueReleases] = useState(null);
+  const [isLoadingReleases, setIsLoadingReleases] = useState(false);
+
   // 1. Fetch Issue Data
   const fetchIssue = useCallback(async () => {
     if (!selectedProject || !id) return;
@@ -155,10 +159,25 @@ export function IssueDetailPage() {
     [selectedProject?.id, selectedTenant?.id, id]
   );
 
+  // 4. Fetch Release Correlation (Phase 8)
+  const fetchReleasesCorrelation = useCallback(async () => {
+    if (!selectedProject || !id || !selectedTenant) return;
+    setIsLoadingReleases(true);
+    try {
+      const data = await api.getIssueReleases(selectedTenant.id, selectedProject.id, id);
+      setIssueReleases(data);
+    } catch (err) {
+      console.error('Failed to fetch issue releases:', err);
+    } finally {
+      setIsLoadingReleases(false);
+    }
+  }, [selectedProject?.id, selectedTenant?.id, id]);
+
   useEffect(() => {
     fetchIssue();
     fetchEvents(0, false);
-  }, [fetchIssue, fetchEvents]);
+    fetchReleasesCorrelation();
+  }, [fetchIssue, fetchEvents, fetchReleasesCorrelation]);
 
   useEffect(() => {
     fetchTrend(trendRange);
@@ -434,6 +453,54 @@ export function IssueDetailPage() {
               {formatNumber(issue.count)} total deduplicated occurrences
             </span>
           </div>
+        </div>
+
+        {/* Release Correlation (Phase 8) */}
+        <div className="pt-3 border-t border-zinc-800/80">
+          <div className="flex items-center gap-2 mb-2">
+            <Tag className="h-3.5 w-3.5 text-indigo-400" />
+            <span className="text-xs font-semibold text-zinc-300">Release Correlation</span>
+            {issueReleases && issueReleases.release_count > 0 && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">
+                {issueReleases.release_count} affected
+              </span>
+            )}
+          </div>
+          {isLoadingReleases ? (
+            <span className="text-xs text-zinc-500">Checking correlated releases...</span>
+          ) : issueReleases && issueReleases.affected_releases && issueReleases.affected_releases.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-4 text-xs">
+              <div>
+                <span className="text-[11px] text-zinc-500 block mb-0.5">First Seen in</span>
+                <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-xs border border-zinc-700">
+                  {issueReleases.first_seen_release || 'N/A'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[11px] text-zinc-500 block mb-0.5">Latest Seen in</span>
+                <span className="px-2 py-0.5 rounded bg-indigo-950/40 text-indigo-300 font-mono text-xs border border-indigo-800/50">
+                  {issueReleases.latest_release || 'N/A'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[11px] text-zinc-500 block mb-0.5">All Affected Releases</span>
+                <div className="flex flex-wrap gap-1">
+                  {issueReleases.affected_releases.map((rel) => (
+                    <span
+                      key={rel}
+                      className="px-1.5 py-0.5 rounded bg-zinc-800/80 text-zinc-400 font-mono text-[11px] border border-zinc-700/60"
+                    >
+                      {rel}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <span className="text-xs text-zinc-500 italic">
+              No releases tagged in error events for this issue yet.
+            </span>
+          )}
         </div>
       </div>
 

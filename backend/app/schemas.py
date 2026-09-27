@@ -198,3 +198,123 @@ class TimeSeriesResponse(BaseModel):
     range: str
     total_events: int
     buckets: list[TimeSeriesBucket]
+
+
+# =========================================================================
+# Phase 8: Releases & Feature Flag Schemas
+# =========================================================================
+
+class ReleaseCreate(BaseModel):
+    version: str = Field(min_length=1, max_length=100)
+    commit_sha: str | None = Field(default=None, max_length=40)
+    environment: str = Field(default="production", min_length=1, max_length=50)
+
+
+class ReleaseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    version: str
+    commit_sha: str | None = None
+    environment: str
+    created_at: datetime
+
+
+class EnvironmentCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+
+
+class EnvironmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    key: str
+    name: str
+    created_at: datetime
+
+
+class FeatureFlagCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class FeatureFlagUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class RolloutUpdate(BaseModel):
+    percentage: int = Field(ge=0, le=100)
+    salt: str | None = None
+
+
+class TargetingRuleInput(BaseModel):
+    priority: int = 0
+    attribute: str = Field(min_length=1, max_length=50)
+    operator: str = Field(min_length=1, max_length=30)
+    values: list[str]
+    variant: str = "on"
+
+
+class TargetingRuleResponse(BaseModel):
+    id: int
+    priority: int
+    attribute: str
+    operator: str
+    values: list[str]
+    variant: str
+
+
+class FlagSettingResponse(BaseModel):
+    id: int
+    flag_id: int
+    environment_id: int
+    environment_key: str
+    enabled: bool
+    default_variant: str
+    rollout_percentage: int
+    rollout_salt: str
+    rules: list[TargetingRuleResponse] = []
+
+
+class FeatureFlagResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    key: str
+    name: str
+    description: str | None = None
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    settings: list[FlagSettingResponse] = []
+
+
+class FlagAuditLogResponse(BaseModel):
+    id: int
+    flag_id: int
+    environment_id: int | None = None
+    actor_id: int | None = None
+    actor_email: str | None = None
+    action: str
+    before_state: str | None = None
+    after_state: str | None = None
+    created_at: datetime
+
+
+class FlagEvaluationResult(BaseModel):
+    enabled: bool
+    variant: str
+    reason: str | None = None
+    percentage: int | None = None
+    salt: str | None = None
+
+
+class ConfigDocumentResponse(BaseModel):
+    environment: str
+    flags: dict[str, FlagEvaluationResult]
