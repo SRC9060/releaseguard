@@ -4,6 +4,7 @@ import ProjectSelector from '../projects/ProjectSelector';
 import TenantSelector from '../tenants/TenantSelector';
 import TestEventModal from '../events/TestEventModal';
 import { useAuth } from '../../context/AuthContext';
+import { BASE_URL } from '../../services/api';
 
 export function Header({ onOpenMobile, onEventIngested }) {
   const [isTestModalOpen, setIsTestModalOpen] = useState(false);
@@ -38,7 +39,7 @@ export function Header({ onOpenMobile, onEventIngested }) {
           </button>
 
           <a
-            href="http://127.0.0.1:8000/docs"
+            href={`${BASE_URL}/docs`}
             target="_blank"
             rel="noreferrer"
             className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-zinc-800 transition"

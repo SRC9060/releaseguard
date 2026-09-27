@@ -164,7 +164,7 @@ from app.queue import EventQueue, get_queue
 
 
 @app.get("/health/ready", tags=["system"])
-def health_readiness(queue: EventQueue = Depends(get_queue)):
+def health_readiness():
     """
     Readiness probe: indicates whether critical downstream dependencies
     (PostgreSQL and Redis) are connected and ready to process traffic.
@@ -185,6 +185,10 @@ def health_readiness(queue: EventQueue = Depends(get_queue)):
 
     # Check Redis
     try:
+        if get_queue in app.dependency_overrides:
+            queue = app.dependency_overrides[get_queue]()
+        else:
+            queue = get_queue()
         queue_health = queue.get_health()
         redis_connected = queue_health.get("redis_connected", False)
         details["redis"] = "connected" if redis_connected else "disconnected"

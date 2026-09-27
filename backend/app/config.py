@@ -24,8 +24,12 @@ class Settings:
         self.JWT_EXPIRATION_MINUTES: int = int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))
         
         # Security & CORS
+        self.FRONTEND_URL: str | None = os.getenv("FRONTEND_URL")
         cors_raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173")
-        self.CORS_ORIGINS: List[str] = [origin.strip() for origin in cors_raw.split(",") if origin.strip()]
+        origins = [origin.strip() for origin in cors_raw.split(",") if origin.strip()]
+        if self.FRONTEND_URL and self.FRONTEND_URL.strip() not in origins:
+            origins.append(self.FRONTEND_URL.strip())
+        self.CORS_ORIGINS: List[str] = origins
         
         # Payload size limits (bytes)
         self.MAX_PAYLOAD_SIZE: int = int(os.getenv("MAX_PAYLOAD_SIZE", str(1 * 1024 * 1024)))  # 1MB

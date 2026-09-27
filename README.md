@@ -1,28 +1,23 @@
-# ReleaseGuard v0.1 — Production Hardening & Reliability
+# ReleaseGuard v0.1 — Production-Hardened Release Reliability Platform
 
-ReleaseGuard is a developer reliability and error-tracking SaaS platform providing:
-- High-throughput asynchronous error event ingestion
-- Deterministic cryptographic fingerprinting and atomic PostgreSQL issue grouping
-- Multi-tenancy with Role-Based Access Control (Owner, Admin, Member) and Last-Owner protection
-- Release tracking and incident response with automated advisory recommendations
-- Controlled incident mitigation requiring explicit human approval
-- Deterministic feature flag evaluation with environment-level rollout rules and ETag/304 caching
-- React web dashboard and Python SDK
+ReleaseGuard is a developer reliability, error-tracking, and controlled mitigation platform. It bridges continuous telemetry ingestion with deterministic feature flag delivery and human-in-the-loop incident mitigation.
 
 ---
 
-## Core System Principles & Invariants
+## 1. Project Overview
 
-1. **PostgreSQL is the Persistent Database**: All state (tenants, memberships, projects, issues, error events, releases, flags, incidents, mitigations, audit logs) is durably stored with strict ACID guarantees, foreign keys, and indexes. Schema evolution is managed via Alembic migrations.
-2. **Redis Streams is the Asynchronous Queue**: Ingestion is decoupled from PostgreSQL writes. Ingestion endpoints return `HTTP 202 Accepted` in ~15ms by pushing events onto Redis Streams (`releaseguard:events:stream`). A background worker group consumes batches with dead-letter queue (DLQ) routing, `XAUTOCLAIM` stale pending entry recovery, and stream trimming (`MAXLEN ~ 100000`).
-3. **The Python SDK Sends Events Asynchronously**: The SDK buffers events in an in-memory bounded queue and transmits them via a background daemon thread. It never executes synchronous network I/O in the application's critical path.
-4. **Feature Flags are Evaluated Deterministically**: For a given `(user, flag, environment)` triplet, evaluation is pure and deterministic using integer hashing and rollout thresholds.
-5. **Mitigation Requires Explicit Human Approval**: Incident mitigations (e.g. flag kill switches, rollback) are advisory. They require explicit authenticated user approval before execution; autonomous destructive mutations are forbidden.
-6. **End-to-End Event Idempotency**: Each event carries a stable UUID `event_id`. If a network retry or redelivery occurs, the worker uses PostgreSQL `ON CONFLICT (event_id) DO NOTHING`. If a duplicate is detected, the transaction rolls back without incrementing issue counts or falsely triggering regressions.
+ReleaseGuard provides a modern, full-stack reliability engineering toolkit:
+- High-throughput asynchronous error event ingestion via Redis Streams.
+- Frame normalization, cryptographic stack trace fingerprinting, and concurrency-safe PostgreSQL issue aggregation.
+- Multi-tenancy with Role-Based Access Control (Owner, Admin, Member) and transactional Last-Owner protection.
+- Deterministic feature flag delivery with percentage-based rollouts and ETag/304 caching.
+- Automated anomaly detection correlating error spikes to recent deployments and feature flags.
+- Controlled incident mitigation requiring explicit authenticated human approval.
+- Full audit logging tracking every flag change, rollout shift, and mitigation action.
 
 ---
 
-## Architecture Overview
+## 2. Architecture
 
 ```
                       +---------------------------------------+
@@ -42,8 +37,8 @@ ReleaseGuard is a developer reliability and error-tracking SaaS platform providi
 |  - Correlation ID Middleware (X-Request-ID)                                 |
 |  - Security Headers (nosniff, DENY, strict-origin)                          |
 |  - Payload Size Limiter (413 Payload Too Large)                             |
-|  - Auth Rate Limiter & Lockout (429 Too Many Requests)                      |
-|  - JWT Authentication & RBAC Enforcement                                    |
+|  - Distributed Auth Rate Limiter & Lockout (429 Too Many Requests)          |
+|  - JWT Authentication (HS256) & RBAC Enforcement                            |
 |  - Separation: Liveness (/health) & Readiness (/health/ready)               |
 +-----------------------------------------------------------------------------+
             |                                           |
@@ -69,29 +64,136 @@ ReleaseGuard is a developer reliability and error-tracking SaaS platform providi
 
 ---
 
-## Local Setup & Prerequisites
+## 3. Main Capabilities
 
-### 1. Requirements
+- **Asynchronous Telemetry Ingestion**: Ingest endpoints respond in under 25ms (`HTTP 202 Accepted`), queuing payloads onto Redis Streams (`events:stream`).
+- **End-to-End Idempotency**: Stable UUID4 `event_id` enforced by PostgreSQL unique constraints. Re-delivered messages are safely rolled back and acknowledged via `XACK` without corrupting counts.
+- **Deterministic Feature Rollouts**: Rollout buckets are calculated via `CRC32(flag_key + ":" + user_id) % 100`. For any user and flag, evaluation results are mathematically stable.
+- **Issue Grouping & Regression Detection**: Resolving an issue transitions it to `resolved`. New occurrences automatically trigger regression detection, returning the issue to `unresolved`.
+- **Advisory Mitigation with Human-in-the-Loop**: Spikes produce actionable root-cause recommendations (kill feature flag or rollback release). Destructive mitigations require explicit human approval and record an immutable audit trail.
+- **Multi-Tenant Data Scoping**: Client requests cannot forge tenant identity; row-level query scoping prevents cross-tenant data leakage.
+
+---
+
+## 4. Tech Stack
+
+- **Backend API**: Python 3.12, FastAPI, Uvicorn, SQLAlchemy 2.0, Pydantic v2, PyJWT, bcrypt.
+- **Persistent Database**: PostgreSQL 17.
+- **Queue / Cache**: Redis 7 (Redis Streams, Consumer Groups, Distributed Keys).
+- **Database Migrations**: Alembic.
+- **Frontend Dashboard**: React 18, Vite, TailwindCSS, Lucide Icons.
+- **Frontend Web Server**: Nginx (Alpine).
+- **Client SDK**: Python SDK with non-blocking worker thread and bounded queue.
+
+---
+
+## 5. Repository Structure
+
+```
+releaseguard_v0_1/
+├── backend/
+│   ├── alembic.ini                   # Alembic configuration
+│   ├── Dockerfile                    # Production backend container definition
+│   ├── migrations/                   # Alembic database migrations
+│   │   ├── env.py
+│   │   └── versions/
+│   ├── app/                          # FastAPI application core
+│   │   ├── auth.py                   # JWT & password hashing
+│   │   ├── auth_limiter.py           # Distributed Redis auth rate limiter
+│   │   ├── config.py                 # Pydantic environment settings
+│   │   ├── db.py                     # SQLAlchemy session & engine
+│   │   ├── models.py                 # SQLAlchemy database models
+│   │   ├── queue.py                  # Redis Streams event queue
+│   │   ├── worker.py                 # Autonomous ingestion worker
+│   │   ├── routers/                  # API endpoints
+│   │   │   ├── auth.py
+│   │   │   ├── events.py
+│   │   │   ├── flags.py
+│   │   │   ├── incidents.py
+│   │   │   ├── issues.py
+│   │   │   ├── metrics.py
+│   │   │   ├── releases.py
+│   │   │   └── tenants.py
+│   │   └── main.py                   # Application entrypoint & middleware
+│   ├── scripts/                      # Operational scripts
+│   │   ├── run_benchmarks.py         # Performance benchmark suite
+│   │   ├── seed_demo.py              # Deterministic demo data seeder
+│   │   └── verify_migration_equivalence.py
+│   └── tests/                        # Backend test suite (pytest)
+├── frontend/
+│   ├── Dockerfile                    # Production frontend container
+│   ├── nginx.conf                    # Nginx SPA & security config
+│   ├── src/                          # React application code
+│   │   ├── components/               # UI components
+│   │   ├── context/                  # React Auth & Project Context
+│   │   ├── pages/                    # Route pages
+│   │   └── services/                 # API client layer (api.js)
+│   └── package.json
+├── sdk/
+│   └── python/                       # ReleaseGuard Python SDK
+│       ├── releaseguard/
+│       └── tests/
+├── docs/                             # Documentation
+│   ├── architecture.md
+│   ├── deployment.md
+│   ├── demo.md
+│   ├── project_summary.md
+│   └── security_audit.md
+├── docker-compose.yml                # Production staging orchestration
+├── .env.example                      # Production environment template
+└── README.md
+```
+
+---
+
+## 6. Local Setup
+
+### Prerequisites
 - Python 3.11+
 - Node.js 20+ (with npm)
 - PostgreSQL 16+ running on `localhost:5432`
 - Redis 6.2+ running on `localhost:6379`
 
-### 2. Environment Configuration
-
-Copy the example environment configuration to `.env`:
+### Environment File Setup
+Copy the example environment template:
 ```bash
 cp .env.example .env
 ```
 
-Review and adjust variables in `.env`:
+---
+
+## 7. PostgreSQL Setup
+
+Create a database dedicated to ReleaseGuard:
+```sql
+CREATE DATABASE releaseguard;
+CREATE USER postgres WITH ENCRYPTED PASSWORD 'postgres';
+GRANT ALL PRIVILEGES ON DATABASE releaseguard TO postgres;
+```
+
+---
+
+## 8. Redis Setup
+
+Ensure Redis is installed and running on port `6379`:
+```bash
+redis-cli ping
+# Expected response: PONG
+```
+
+---
+
+## 9. Environment Variables
+
+Configure `.env` with required parameters:
 ```env
 ENVIRONMENT=development
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/releaseguard
 REDIS_URL=redis://127.0.0.1:6379/0
-JWT_SECRET=your-secure-random-32-byte-hex-string
+JWT_SECRET=your-32-byte-hex-secret-must-be-secure
 JWT_EXPIRATION_MINUTES=1440
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+FRONTEND_URL=http://localhost:5173
 MAX_PAYLOAD_SIZE=1048576
 MAX_BULK_PAYLOAD_SIZE=5242880
 MAX_BULK_EVENTS=100
@@ -101,81 +203,48 @@ AUTH_LOCKOUT_SECONDS=900
 
 ---
 
-## Database Migrations (Alembic)
+## 10. Alembic Migrations
 
-ReleaseGuard uses Alembic for persistent database schema management.
-
-### Migration Commands
-
+All schema changes are tracked and applied through Alembic:
 ```bash
 cd backend
-
-# View current database revision
-alembic current
-
-# Apply all pending migrations to head
 alembic upgrade head
-
-# Stamp existing development database at head (without re-creating existing tables)
-alembic stamp head
-
-# Downgrade one revision
-alembic downgrade -1
 ```
-
-> **Note**: In production mode (`ENVIRONMENT=production`), the application startup never creates or drops database tables. Tables must be migrated explicitly with `alembic upgrade head`.
 
 ---
 
-## Running the Application
+## 11. Backend Startup
 
-### 1. Start FastAPI Backend
-
+To run the backend in production mode without reload:
 ```bash
-cd backend
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+For development with hot reloading:
+```bash
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Endpoints available:
-- **API Documentation**: http://127.0.0.1:8000/docs
-- **Liveness Probe**: http://127.0.0.1:8000/health
-- **Readiness Probe**: http://127.0.0.1:8000/health/ready
+---
 
-### 2. Start Background Ingestion Worker
+## 12. Worker Startup
 
-In a separate terminal:
+Run the Redis Streams ingestion worker in an independent process:
 ```bash
-cd backend
 python -m app.worker
 ```
+The worker will automatically create consumer groups, process queued events, handle stale PEL entries, and route toxic events to `events:dlq`.
 
-The worker connects to Redis Streams, processes batches, executes PostgreSQL atomic upserts, handles stale pending recovery, and gracefully backs off if Redis is temporarily unreachable.
+---
 
-### 3. Start Frontend Dashboard
+## 13. Frontend Startup
 
-In a separate terminal:
+For local development:
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-The React dashboard opens at http://localhost:5173.
-
----
-
-## Testing & Quality Assurance
-
-### Run Full Test Suite
-
-```bash
-pytest -v backend sdk/python/tests
-```
-
-All 96 automated tests run against PostgreSQL, Redis Streams (using isolated test queues), and the Python SDK.
-
-### Build Frontend Production Bundle
-
+For production build:
 ```bash
 cd frontend
 npm run build
@@ -183,29 +252,95 @@ npm run build
 
 ---
 
-## Practical Local Performance Benchmarks
+## 14. Test Commands
 
-Run the benchmark measurement script:
+Run the full automated test suite (98 tests across backend and SDK):
 ```bash
-python backend/scripts/run_benchmarks.py
+pytest -v backend sdk/python/tests
 ```
-
-Measured on Windows 11, Python 3.12, PostgreSQL 17:
-- **Paginated Issue Query (`limit=20`)**: Mean 16.13ms | Median 15.71ms | P95 20.72ms
-- **Paginated Event Query (`limit=20`)**: Mean 19.24ms | Median 16.39ms | P95 25.83ms
-- **Config Evaluation Endpoint**: Mean 4.85ms | Median 4.68ms | P95 5.92ms
-- **Authenticated API Request**: Mean 15.66ms | Median 15.44ms | P95 19.98ms
-- **Bulk Event Ingestion (`25 events`)**: Mean 18.58ms | Median 17.15ms | P95 26.86ms
-- **Hardened Worker Batch (`10 events`)**: Mean 80.76ms | Median 81.61ms | P95 96.26ms
 
 ---
 
-## Basic Troubleshooting
+## 15. Seed / Demo Data
 
-| Symptom | Cause | Solution |
-| :--- | :--- | :--- |
-| `GET /health/ready` returns 503 | PostgreSQL or Redis is unreachable | Check PostgreSQL (`psql -U postgres`) and Redis (`redis-cli ping`). |
-| Ingestion returns 413 | Request payload exceeds size limit | Reduce batch size or raise `MAX_BULK_PAYLOAD_SIZE`. |
-| Login returns 429 | More than 5 failed login attempts | Wait 15 minutes or reset lockout in Redis (`DEL auth:failed:<email>`). |
-| Worker warns about duplicate event | Redelivery of already-committed event | Normal idempotent behavior. Transaction is safely rolled back. |
-| Alembic revision mismatch | Database is unversioned | Run `alembic stamp head` on existing databases or `alembic upgrade head` on clean databases. |
+To populate deterministic sample data for demonstrations:
+```bash
+python backend/scripts/seed_demo.py
+```
+This idempotently creates:
+- **Organization**: Acme Corp
+- **User**: `demo@releaseguard.dev` / `DemoPassword123!`
+- **Project**: Checkout Service
+- **Environments**: development, staging, production
+- **Releases**: `1.0.0`, `1.1.0`, `1.2.0`
+- **Feature Flags**: `new_checkout`, `new_payment_flow`, `experimental_dashboard`
+- **Sample Issues**: `DatabaseConnectionTimeout`, `PaymentGatewayError`, `AuthenticationError`
+- **Incidents**: `Payment Gateway Surge`, `Database Error Spike`
+
+---
+
+## 16. Deployment Architecture
+
+In production, ReleaseGuard deploys as isolated containers:
+1. **Frontend**: Static bundle served via Alpine Nginx.
+2. **API**: FastAPI running under Uvicorn ASGI behind a load balancer.
+3. **Worker**: Standalone background Python consumer.
+4. **PostgreSQL**: Managed persistent relational cluster.
+5. **Redis**: Managed Redis cluster with persistence enabled.
+
+Refer to [`docs/deployment.md`](file:///d:/releaseguard_v0_1/docs/deployment.md) for full instructions and Kubernetes/Docker specifications.
+
+---
+
+## 17. Health & Readiness Checks
+
+- **Liveness Probe**: `GET /health` -> `{"status": "ok", "service": "releaseguard-api"}`
+- **Readiness Probe**: `GET /health/ready` -> Verifies active PostgreSQL and Redis connectivity:
+  ```json
+  {
+    "status": "ready",
+    "checks": {
+      "database": "connected",
+      "redis": "connected"
+    }
+  }
+  ```
+
+---
+
+## 18. Example ReleaseGuard Workflow
+
+See [`docs/demo.md`](file:///d:/releaseguard_v0_1/docs/demo.md) for the complete 18-step interactive scenario covering:
+1. Release deployment (`v1.3.0`)
+2. Feature flag rollout (`25%`)
+3. SDK error telemetry ingestion
+4. Asynchronous worker ingestion & issue deduplication
+5. Anomaly detection & incident triggering
+6. Automated correlation with release & flag
+7. Human-approved mitigation (flag kill-switch)
+8. Audit trail verification and incident resolution
+
+---
+
+## 19. Known Limitations
+
+- **Stateless JWT Blacklisting**: Revoking a compromised token before expiration requires token expiration or client-side storage clearance.
+- **Worker Scale Group Coordination**: Workers coordinate via Redis consumer groups; duplicate worker identifiers within the same consumer group must be avoided.
+- **Telemetry Throttling**: Ingestion rate limits rely on upstream reverse proxies (Nginx / Cloudflare) to protect the edge API from massive volumetric DDoS.
+
+---
+
+## 20. Benchmark Methodology
+
+Benchmarks are executed via `backend/scripts/run_benchmarks.py` using statistical sampling across 50 iterations:
+
+| Metric | Sample Size | Mean | Median | P95 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Config Evaluation (ETag Cached)** | 50 | **6.64 ms** | **6.58 ms** | **7.68 ms** |
+| **Paginated Issue Query (`limit=20`)** | 50 | **15.64 ms** | **15.50 ms** | **16.92 ms** |
+| **Paginated Event Query (`limit=20`)** | 50 | **22.01 ms** | **19.76 ms** | **22.92 ms** |
+| **Authenticated API Request** | 50 | **19.45 ms** | **19.34 ms** | **22.50 ms** |
+| **Bulk Event Ingestion (`25 events`)** | 50 | **23.74 ms** | **23.65 ms** | **27.44 ms** |
+| **Worker Batch Processing (`10 events`)** | 25 | **103.57 ms**| **101.72 ms**| **114.00 ms**|
+
+*Measurements conducted locally on Windows 11, Python 3.12, PostgreSQL 17, Redis 7.*

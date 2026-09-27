@@ -14,6 +14,7 @@ import {
   Layers,
 } from 'lucide-react';
 import api from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 
 const NAV_ITEMS = [
   { name: 'Overview', path: '/', icon: LayoutDashboard, isFunctional: true },
@@ -26,6 +27,7 @@ const NAV_ITEMS = [
 ];
 
 export function Sidebar({ mobileOpen, onCloseMobile }) {
+  const { user } = useAuth();
   const [isBackendHealthy, setIsBackendHealthy] = useState(null);
 
   useEffect(() => {
@@ -150,14 +152,18 @@ export function Sidebar({ mobileOpen, onCloseMobile }) {
             </span>
           </div>
 
-          {/* User profile placeholder */}
+          {/* User profile / session */}
           <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-zinc-900/50 transition cursor-default">
-            <div className="h-7 w-7 rounded-lg bg-zinc-800 border border-zinc-700/80 flex items-center justify-center text-zinc-300 font-semibold text-xs">
-              RG
+            <div className="h-7 w-7 rounded-lg bg-zinc-800 border border-zinc-700/80 flex items-center justify-center text-zinc-300 font-semibold text-xs uppercase">
+              {user?.email ? user.email.slice(0, 2).toUpperCase() : 'RG'}
             </div>
             <div className="flex-1 truncate">
-              <div className="text-xs font-medium text-zinc-200 truncate">DevOps Team</div>
-              <div className="text-[10px] text-zinc-500 truncate font-mono">admin@releaseguard.local</div>
+              <div className="text-xs font-medium text-zinc-200 truncate">
+                {user?.email ? user.email.split('@')[0] : 'ReleaseGuard'}
+              </div>
+              <div className="text-[10px] text-zinc-500 truncate font-mono">
+                {user?.email || 'admin@releaseguard.dev'}
+              </div>
             </div>
           </div>
         </div>

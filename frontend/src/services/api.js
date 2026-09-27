@@ -351,5 +351,5 @@ export const api = {
   },
 };
 
-export { ApiError };
+export { BASE_URL, ApiError };
 export default api;
