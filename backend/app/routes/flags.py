@@ -276,6 +276,8 @@ def list_feature_flags(
     tenant_id: int,
     project_id: int,
     include_archived: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -284,7 +286,7 @@ def list_feature_flags(
     if not include_archived:
         query = query.filter(FeatureFlag.archived_at.is_(None))
 
-    flags = query.order_by(FeatureFlag.created_at.desc(), FeatureFlag.id.desc()).all()
+    flags = query.order_by(FeatureFlag.created_at.desc(), FeatureFlag.id.desc()).offset(offset).limit(limit).all()
     return [serialize_flag(f) for f in flags]
 
 
@@ -621,6 +623,8 @@ def get_flag_audit_logs(
     tenant_id: int,
     project_id: int,
     flag_id: int,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -638,6 +642,8 @@ def get_flag_audit_logs(
         .outerjoin(User, FlagAuditLog.actor_id == User.id)
         .filter(FlagAuditLog.flag_id == flag.id)
         .order_by(FlagAuditLog.created_at.desc(), FlagAuditLog.id.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 

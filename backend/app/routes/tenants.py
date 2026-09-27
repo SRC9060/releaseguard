@@ -133,6 +133,8 @@ def create_tenant(
     response_model=list[TenantResponse],
 )
 def list_user_tenants(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -140,6 +142,9 @@ def list_user_tenants(
         db.query(Membership, Tenant)
         .join(Tenant, Membership.tenant_id == Tenant.id)
         .filter(Membership.user_id == current_user.id)
+        .order_by(Tenant.id.asc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return [
@@ -183,6 +188,8 @@ def get_tenant(
 )
 def list_tenant_members(
     tenant_id: int,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -191,6 +198,9 @@ def list_tenant_members(
         db.query(Membership, User.email)
         .join(User, Membership.user_id == User.id)
         .filter(Membership.tenant_id == tenant_id)
+        .order_by(Membership.id.asc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return [
@@ -428,6 +438,8 @@ def create_tenant_project(
 )
 def list_tenant_projects(
     tenant_id: int,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -436,6 +448,8 @@ def list_tenant_projects(
         db.query(Project)
         .filter(Project.tenant_id == tenant_id)
         .order_by(Project.id.asc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
     return projects

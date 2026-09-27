@@ -316,6 +316,8 @@ def ingest_event(
 def list_issues(
     project_id: int,
     status: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     get_project_or_404(db, project_id)
@@ -330,7 +332,7 @@ def list_issues(
             )
         query = query.filter(Issue.status == status)
 
-    issues = query.order_by(Issue.last_seen.desc()).all()
+    issues = query.order_by(Issue.last_seen.desc(), Issue.id.desc()).offset(offset).limit(limit).all()
     return issues
 
 

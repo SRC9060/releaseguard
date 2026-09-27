@@ -184,16 +184,59 @@ class IngestionWorker:
 
         return processed
 
-    def run(self, poll_interval: float = 0.05) -> None:
+    def recover_stale_messages(
+        self, min_idle_time_ms: int = 30000, count: int = 50
+    ) -> int:
+        """Recovers and processes stale pending entries from the PEL."""
+        stale_messages = self.queue.recover_stale_pending(
+            min_idle_time_ms=min_idle_time_ms,
+            count=count,
+            consumer_name=self.consumer_name,
+        )
+        if not stale_messages:
+            return 0
+        processed = 0
+        db = self.session_factory()
+        try:
+            for msg_id, data in stale_messages:
+                success = self._process_single_message(msg_id, data, db)
+                if success:
+                    processed += 1
+        finally:
+            db.close()
+        return processed
+
+    def run(self, poll_interval: float = 0.05, stale_check_interval: float = 10.0) -> None:
         """Continuously processes events until stop_event is set."""
         logger.info(
             "ReleaseGuard IngestionWorker '%s' started. Polling Redis stream...",
             self.consumer_name,
         )
+        last_stale_check = time.time()
+        backoff_seconds = 1.0
+
         while not self.stop_event.is_set():
-            count = self.process_next_batch(timeout_ms=500)
-            if count == 0 and not self.stop_event.is_set():
-                time.sleep(poll_interval)
+            try:
+                count = self.process_next_batch(timeout_ms=500)
+                backoff_seconds = 1.0  # Reset backoff on success
+
+                now = time.time()
+                if now - last_stale_check >= stale_check_interval:
+                    self.recover_stale_messages()
+                    last_stale_check = now
+
+                if count == 0 and not self.stop_event.is_set():
+                    time.sleep(poll_interval)
+            except Exception as exc:
+                if self.stop_event.is_set():
+                    break
+                logger.warning(
+                    "Worker connection or processing error: %s. Backing off for %.1fs...",
+                    exc,
+                    backoff_seconds,
+                )
+                time.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, 10.0)
 
         logger.info("ReleaseGuard IngestionWorker '%s' stopped cleanly.", self.consumer_name)
 

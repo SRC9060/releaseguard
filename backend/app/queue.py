@@ -92,7 +92,7 @@ class EventQueue:
                 "retry_count": "0",
                 "enqueued_at": now_iso,
             }
-            pipe.xadd(self.stream_name, fields)
+            pipe.xadd(self.stream_name, fields, maxlen=100000, approximate=True)
 
         pipe.incrby(COUNTER_ACCEPTED, len(events))
         pipe.execute()
@@ -149,6 +149,89 @@ class EventQueue:
 
         return messages
 
+    def recover_stale_pending(
+        self,
+        min_idle_time_ms: int = 30000,
+        count: int = 50,
+        consumer_name: str = "worker_recovery",
+    ) -> list[tuple[str, dict[str, str]]]:
+        """
+        Recovers stale pending entries from the PEL (from dead/crashed workers)
+        using XAUTOCLAIM or XPENDING + XCLAIM.
+        """
+        self._ensure_consumer_group()
+        try:
+            # Redis 6.2+ xautoclaim returns (next_start_id, messages, deleted_ids)
+            res = self.client.xautoclaim(
+                self.stream_name,
+                self.group_name,
+                consumer_name,
+                min_idle_time=min_idle_time_ms,
+                start_id="0-0",
+                count=count,
+            )
+            raw_messages = res[1] if isinstance(res, (list, tuple)) and len(res) > 1 else []
+            recovered: list[tuple[str, dict[str, str]]] = []
+            for msg_id, data in raw_messages:
+                decoded_data = {
+                    k if isinstance(k, str) else k.decode(): v
+                    if isinstance(v, str)
+                    else v.decode()
+                    for k, v in data.items()
+                }
+                recovered.append(
+                    (
+                        msg_id if isinstance(msg_id, str) else msg_id.decode(),
+                        decoded_data,
+                    )
+                )
+            if recovered:
+                logger.info("Recovered %d stale pending messages via XAUTOCLAIM", len(recovered))
+            return recovered
+        except Exception as exc:
+            # Fallback to XPENDING + XCLAIM
+            try:
+                pending_entries = self.client.xpending_range(
+                    self.stream_name,
+                    self.group_name,
+                    min="-",
+                    max="+",
+                    count=count,
+                )
+                stale_ids = [
+                    p["message_id"] for p in pending_entries
+                    if p.get("idle", 0) >= min_idle_time_ms
+                ]
+                if not stale_ids:
+                    return []
+                claimed = self.client.xclaim(
+                    self.stream_name,
+                    self.group_name,
+                    consumer_name,
+                    min_idle_time=min_idle_time_ms,
+                    message_ids=stale_ids,
+                )
+                recovered = []
+                for msg_id, data in claimed:
+                    decoded_data = {
+                        k if isinstance(k, str) else k.decode(): v
+                        if isinstance(v, str)
+                        else v.decode()
+                        for k, v in data.items()
+                    }
+                    recovered.append(
+                        (
+                            msg_id if isinstance(msg_id, str) else msg_id.decode(),
+                            decoded_data,
+                        )
+                    )
+                if recovered:
+                    logger.info("Recovered %d stale pending messages via XCLAIM fallback", len(recovered))
+                return recovered
+            except Exception as inner_exc:
+                logger.debug("Stale PEL recovery error: %s", inner_exc)
+                return []
+
     def ack(self, message_id: str) -> None:
         """Acknowledges successful processing of a message."""
         pipe = self.client.pipeline()
@@ -179,7 +262,7 @@ class EventQueue:
             retry_data = dict(data)
             retry_data["retry_count"] = str(current_retries)
             retry_data["last_error"] = str(error_msg)[:500]
-            pipe.xadd(self.stream_name, retry_data)
+            pipe.xadd(self.stream_name, retry_data, maxlen=100000, approximate=True)
             pipe.xack(self.stream_name, self.group_name, message_id)
             pipe.execute()
             logger.warning(
@@ -198,7 +281,7 @@ class EventQueue:
             dead_data["failed_at"] = datetime.now(timezone.utc).isoformat()
             dead_data["original_msg_id"] = message_id
 
-            pipe.xadd(self.dead_letter_stream, dead_data)
+            pipe.xadd(self.dead_letter_stream, dead_data, maxlen=50000, approximate=True)
             pipe.xack(self.stream_name, self.group_name, message_id)
             pipe.incrby(COUNTER_FAILED, 1)
             pipe.execute()
@@ -209,6 +292,43 @@ class EventQueue:
                 error_msg,
             )
             return False
+
+    def get_health(self) -> dict[str, Any]:
+        """Returns comprehensive queue health status."""
+        try:
+            self.client.ping()
+            connected = True
+        except Exception:
+            connected = False
+
+        if not connected:
+            return {
+                "status": "degraded",
+                "redis_connected": False,
+                "stream_depth": 0,
+                "pel_count": 0,
+            }
+
+        try:
+            depth = self.client.xlen(self.stream_name)
+        except Exception:
+            depth = 0
+
+        pel_count = 0
+        try:
+            pending_info = self.client.xpending(self.stream_name, self.group_name)
+            if pending_info:
+                pel_count = pending_info.get("pending", 0) if isinstance(pending_info, dict) else pending_info[0]
+        except Exception:
+            pel_count = 0
+
+        return {
+            "status": "healthy",
+            "redis_connected": True,
+            "stream_name": self.stream_name,
+            "stream_depth": depth,
+            "pel_count": pel_count,
+        }
 
     def get_metrics(self) -> dict[str, int]:
         """Returns internal queue observability counters and stream depths."""

@@ -120,15 +120,15 @@ class ProjectResponse(BaseModel):
 # =========================================================================
 
 class ErrorEventCreate(BaseModel):
-    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    exception_type: str
-    message: str
-    stack_trace: str
-    release: str | None = None
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()), max_length=64)
+    exception_type: str = Field(min_length=1, max_length=256)
+    message: str = Field(..., max_length=2000)
+    stack_trace: str = Field(..., max_length=100000)
+    release: str | None = Field(default=None, max_length=100)
 
 
 class BulkErrorEventsCreate(BaseModel):
-    events: list[ErrorEventCreate] = Field(..., min_length=1, max_length=500)
+    events: list[ErrorEventCreate] = Field(..., min_length=1, max_length=100)
 
 
 class BulkIngestResponse(BaseModel):

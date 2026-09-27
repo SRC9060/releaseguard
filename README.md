@@ -1,154 +1,211 @@
-# ReleaseGuard v0.1
+# ReleaseGuard v0.1 — Production Hardening & Reliability
 
-ReleaseGuard is a developer reliability platform for:
-- capturing application errors
-- grouping duplicate failures into issues
-- tracking releases
-- high-throughput asynchronous ingestion pipeline
-- later: deterministic feature flags, multi-tenancy, mitigation, and AI incident assistance
-
----
-
-## Core Invariant
-
-> **`(project_id, fingerprint)` must identify exactly one issue.**
-> 
-> 1,000 identical error events should become 1 issue with `count=1,000`.
+ReleaseGuard is a developer reliability and error-tracking SaaS platform providing:
+- High-throughput asynchronous error event ingestion
+- Deterministic cryptographic fingerprinting and atomic PostgreSQL issue grouping
+- Multi-tenancy with Role-Based Access Control (Owner, Admin, Member) and Last-Owner protection
+- Release tracking and incident response with automated advisory recommendations
+- Controlled incident mitigation requiring explicit human approval
+- Deterministic feature flag evaluation with environment-level rollout rules and ETag/304 caching
+- React web dashboard and Python SDK
 
 ---
 
-## Phase 5 Architecture — Asynchronous Ingestion Pipeline
+## Core System Principles & Invariants
+
+1. **PostgreSQL is the Persistent Database**: All state (tenants, memberships, projects, issues, error events, releases, flags, incidents, mitigations, audit logs) is durably stored with strict ACID guarantees, foreign keys, and indexes. Schema evolution is managed via Alembic migrations.
+2. **Redis Streams is the Asynchronous Queue**: Ingestion is decoupled from PostgreSQL writes. Ingestion endpoints return `HTTP 202 Accepted` in ~15ms by pushing events onto Redis Streams (`releaseguard:events:stream`). A background worker group consumes batches with dead-letter queue (DLQ) routing, `XAUTOCLAIM` stale pending entry recovery, and stream trimming (`MAXLEN ~ 100000`).
+3. **The Python SDK Sends Events Asynchronously**: The SDK buffers events in an in-memory bounded queue and transmits them via a background daemon thread. It never executes synchronous network I/O in the application's critical path.
+4. **Feature Flags are Evaluated Deterministically**: For a given `(user, flag, environment)` triplet, evaluation is pure and deterministic using integer hashing and rollout thresholds.
+5. **Mitigation Requires Explicit Human Approval**: Incident mitigations (e.g. flag kill switches, rollback) are advisory. They require explicit authenticated user approval before execution; autonomous destructive mutations are forbidden.
+6. **End-to-End Event Idempotency**: Each event carries a stable UUID `event_id`. If a network retry or redelivery occurs, the worker uses PostgreSQL `ON CONFLICT (event_id) DO NOTHING`. If a duplicate is detected, the transaction rolls back without incrementing issue counts or falsely triggering regressions.
+
+---
+
+## Architecture Overview
 
 ```
-Application
-    ↓ (non-blocking)
-ReleaseGuard Python SDK (in-memory batching)
-    ↓ HTTP POST /api/v1/projects/{project_id}/events/bulk
-Bulk Ingestion API
-    ↓ Enqueue events into Redis Stream (O(1))
-    ↓ Return HTTP 202 Accepted
-Redis Queue (releaseguard:events:stream)
-    ↓ Dequeue batch via Consumer Group (releaseguard:workers)
-Background Ingestion Worker
-    ↓ Calculate fingerprint (SHA-256 normalized frames)
-    ↓ PostgreSQL Atomic Upsert & ErrorEvent persistence
-    ↓ Commit atomically in single transaction
-    ↓ Acknowledge message (XACK)
-PostgreSQL Database
+                      +---------------------------------------+
+                      |       Host Application / Client       |
+                      +---------------------------------------+
+                                          |
+                      (non-blocking queue)| (async HTTP)
+                                          v
+                      +---------------------------------------+
+                      |      ReleaseGuard Python SDK          |
+                      +---------------------------------------+
+                                          |
+                                          | POST /api/v1/projects/{id}/events/bulk
+                                          v
++-----------------------------------------------------------------------------+
+|                          FastAPI API Service                                |
+|  - Correlation ID Middleware (X-Request-ID)                                 |
+|  - Security Headers (nosniff, DENY, strict-origin)                          |
+|  - Payload Size Limiter (413 Payload Too Large)                             |
+|  - Auth Rate Limiter & Lockout (429 Too Many Requests)                      |
+|  - JWT Authentication & RBAC Enforcement                                    |
+|  - Separation: Liveness (/health) & Readiness (/health/ready)               |
++-----------------------------------------------------------------------------+
+            |                                           |
+    (enqueue events)                               (read state)
+            v                                           v
++-------------------------------+           +---------------------------------+
+|   Redis Streams Event Queue   |           |    PostgreSQL Persistent DB     |
+|  - Stream: events:stream      |           |  - Managed via Alembic          |
+|  - Consumer: releaseguard:wrk |           |  - Concurrency-safe Upserts     |
+|  - Stale PEL Recovery         |           |  - Strict Tenant Scoping        |
+|  - Trimming (MAXLEN ~100000)  |           |  - Connection Pooling           |
++-------------------------------+           +---------------------------------+
+            |                                           ^
+            | (batch dequeue)                           | (atomic transaction)
+            v                                           |
++-------------------------------------------------------+                     |
+|           Background Ingestion Worker (worker.py)     |---------------------+
+|  - Frame Normalization & SHA-256 Fingerprinting       |
+|  - Idempotent Event Insert & Regression Detection     |
+|  - Exponential Reconnect Backoff & Stale PEL Recovery |
++-------------------------------------------------------+
 ```
-
-### Why the Bulk API Returns HTTP 202 Accepted
-In high-throughput distributed systems, an application should never be subjected to database latency, lock contention, or transient database outages during error ingestion. 
-
-When the bulk API receives a batch of events:
-1. It validates the project ID and schema structure.
-2. It pushes the events into a durable **Redis Stream** (`releaseguard:events:stream`).
-3. It immediately returns **HTTP 202 Accepted** with a `batch_id` and `accepted_count`.
-
-The API request path does **not** write to PostgreSQL, calculate fingerprints, or acquire database locks. This decouples client response latency (~15–30 ms) from database processing throughput.
-
-### Why Grouping is Performed Asynchronously
-Issue grouping requires:
-- Normalizing stack frames and stripping UUIDs, memory addresses, and line numbers
-- Generating cryptographic fingerprints
-- Executing an atomic database upsert with row locks (`ON CONFLICT (project_id, fingerprint) DO UPDATE`)
-- Inserting raw `ErrorEvent` audit rows
-
-Executing these steps synchronously inside the HTTP handler creates lock serialization bottlenecks under bursts (e.g. 5,000 concurrent crashes). By deferring grouping to dedicated background workers:
-- Ingestion remains responsive even during database spikes or vacuum operations.
-- Multiple worker processes can consume from Redis concurrently using Consumer Groups without head-of-line blocking.
-- Worker throughput is optimized through batch database transactions.
-
-### End-to-End Event Idempotency
-Redis Streams provide at-least-once delivery. PostgreSQL `event_id` idempotency prevents a redelivered message from being counted twice.
-
-If the worker commits the PostgreSQL transaction and crashes before `XACK`, Redis redelivers the same message:
-1. **Stable Identifier**: Every SDK event generates a stable, unique `event_id` (UUID) upon creation. Retrying transport attempts, in-memory batching, and flush cycles preserve this exact ID.
-2. **Atomic Conflict Check**: The worker executes the issue upsert, followed by an idempotent event insertion:
-   ```sql
-   INSERT INTO error_events (event_id, project_id, issue_id, ...)
-   VALUES (:event_id, :project_id, :issue_id, ...)
-   ON CONFLICT (event_id) DO NOTHING
-   RETURNING id;
-   ```
-3. **Rollback on Duplicate**: If `RETURNING id` produces no row, the worker recognizes that this exact `event_id` was already committed. It rolls back the transaction (`db.rollback()`), preventing the `Issue.count` from incrementing twice, and acknowledges (`XACK`) the duplicate Redis message.
-4. **Atomic Commit on Fresh**: If `RETURNING id` yields a row, both the issue upsert and error event insert commit atomically before the Redis message is acknowledged.
-
-### Why Fakeredis is Test-Only
-In normal application execution (production and local deployment), `REDIS_URL` must point to an active, real Redis instance. If Redis is unavailable, startup or ingestion fails immediately and explicitly. The server will **never** return `HTTP 202 Accepted` while silently storing events in a non-persistent in-memory fake queue.
-
-`fakeredis` is strictly test-only: it is explicitly injected into test suites via FastAPI dependency injection (`app.dependency_overrides[get_queue]`), allowing the test suite to remain completely self-contained without requiring a manually running Redis daemon.
 
 ---
 
-## Concurrency & Race Condition Prevention
+## Local Setup & Prerequisites
 
-The ingestion pipeline uses PostgreSQL's native atomic upsert statement:
+### 1. Requirements
+- Python 3.11+
+- Node.js 20+ (with npm)
+- PostgreSQL 16+ running on `localhost:5432`
+- Redis 6.2+ running on `localhost:6379`
 
-```sql
-INSERT INTO issues (project_id, fingerprint, title, count, first_seen, last_seen)
-VALUES (:project_id, :fingerprint, :title, 1, :now, :now)
-ON CONFLICT (project_id, fingerprint)
-DO UPDATE SET
-    count = issues.count + 1,
-    last_seen = :now
-RETURNING issues.id, issues.count;
-```
+### 2. Environment Configuration
 
-- **Database-Enforced Atomicity**: PostgreSQL checks the `uq_project_fingerprint` unique constraint at the index level. Competing concurrent insertions are serialized at the row lock.
-- **Conflict Handling**: Exactly one transaction inserts the row (returning `count = 1`), while all concurrent and subsequent transactions take the `DO UPDATE` branch, safely incrementing `count` and updating `last_seen`.
-- **Zero Race Window**: The entire check, create-or-increment, and ID retrieval occurs in a single atomic database statement, guaranteeing that 100 concurrent requests result in exactly 1 issue row with `count = 100`.
-
----
-
-## Configuration & Run
-
-### 1. Configuration
-
-Copy the example environment configuration:
+Copy the example environment configuration to `.env`:
 ```bash
 cp .env.example .env
 ```
 
-Configure your PostgreSQL and Redis connection strings in `.env`:
+Review and adjust variables in `.env`:
 ```env
-DATABASE_URL=postgresql+psycopg://username:password@localhost:5432/releaseguard
+ENVIRONMENT=development
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/releaseguard
 REDIS_URL=redis://127.0.0.1:6379/0
+JWT_SECRET=your-secure-random-32-byte-hex-string
+JWT_EXPIRATION_MINUTES=1440
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+MAX_PAYLOAD_SIZE=1048576
+MAX_BULK_PAYLOAD_SIZE=5242880
+MAX_BULK_EVENTS=100
+AUTH_MAX_ATTEMPTS=5
+AUTH_LOCKOUT_SECONDS=900
 ```
 
-*(Note: If a live Redis server is not present locally on Windows, the application and test suites seamlessly use in-memory `fakeredis`.)*
+---
 
-### 2. Install & Run
+## Database Migrations (Alembic)
+
+ReleaseGuard uses Alembic for persistent database schema management.
+
+### Migration Commands
 
 ```bash
-# Setup Python virtualenv
 cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install redis fakeredis
 
-# Start FastAPI API Server
-uvicorn app.main:app --reload
+# View current database revision
+alembic current
 
-# Start Background Ingestion Worker (in a separate terminal)
+# Apply all pending migrations to head
+alembic upgrade head
+
+# Stamp existing development database at head (without re-creating existing tables)
+alembic stamp head
+
+# Downgrade one revision
+alembic downgrade -1
+```
+
+> **Note**: In production mode (`ENVIRONMENT=production`), the application startup never creates or drops database tables. Tables must be migrated explicitly with `alembic upgrade head`.
+
+---
+
+## Running the Application
+
+### 1. Start FastAPI Backend
+
+```bash
+cd backend
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Endpoints available:
+- **API Documentation**: http://127.0.0.1:8000/docs
+- **Liveness Probe**: http://127.0.0.1:8000/health
+- **Readiness Probe**: http://127.0.0.1:8000/health/ready
+
+### 2. Start Background Ingestion Worker
+
+In a separate terminal:
+```bash
+cd backend
 python -m app.worker
 ```
 
-Open:
-- API Documentation: http://127.0.0.1:8000/docs
-- Health Check: http://127.0.0.1:8000/health
+The worker connects to Redis Streams, processes batches, executes PostgreSQL atomic upserts, handles stale pending recovery, and gracefully backs off if Redis is temporarily unreachable.
 
-### 3. Run Tests
+### 3. Start Frontend Dashboard
 
-Run the complete test suite (26 passing tests covering backend, PostgreSQL concurrency, pipeline, worker retries, and SDK):
+In a separate terminal:
 ```bash
-pytest -v
+cd frontend
+npm install
+npm run dev
 ```
 
-### 4. Run Benchmarks
+The React dashboard opens at http://localhost:5173.
 
-Run the pipeline latency and worker throughput benchmark:
+---
+
+## Testing & Quality Assurance
+
+### Run Full Test Suite
+
 ```bash
-python benchmarks/benchmark_pipeline.py
+pytest -v backend sdk/python/tests
 ```
+
+All 96 automated tests run against PostgreSQL, Redis Streams (using isolated test queues), and the Python SDK.
+
+### Build Frontend Production Bundle
+
+```bash
+cd frontend
+npm run build
+```
+
+---
+
+## Practical Local Performance Benchmarks
+
+Run the benchmark measurement script:
+```bash
+python backend/scripts/run_benchmarks.py
+```
+
+Measured on Windows 11, Python 3.12, PostgreSQL 17:
+- **Paginated Issue Query (`limit=20`)**: Mean 16.13ms | Median 15.71ms | P95 20.72ms
+- **Paginated Event Query (`limit=20`)**: Mean 19.24ms | Median 16.39ms | P95 25.83ms
+- **Config Evaluation Endpoint**: Mean 4.85ms | Median 4.68ms | P95 5.92ms
+- **Authenticated API Request**: Mean 15.66ms | Median 15.44ms | P95 19.98ms
+- **Bulk Event Ingestion (`25 events`)**: Mean 18.58ms | Median 17.15ms | P95 26.86ms
+- **Hardened Worker Batch (`10 events`)**: Mean 80.76ms | Median 81.61ms | P95 96.26ms
+
+---
+
+## Basic Troubleshooting
+
+| Symptom | Cause | Solution |
+| :--- | :--- | :--- |
+| `GET /health/ready` returns 503 | PostgreSQL or Redis is unreachable | Check PostgreSQL (`psql -U postgres`) and Redis (`redis-cli ping`). |
+| Ingestion returns 413 | Request payload exceeds size limit | Reduce batch size or raise `MAX_BULK_PAYLOAD_SIZE`. |
+| Login returns 429 | More than 5 failed login attempts | Wait 15 minutes or reset lockout in Redis (`DEL auth:failed:<email>`). |
+| Worker warns about duplicate event | Redelivery of already-committed event | Normal idempotent behavior. Transaction is safely rolled back. |
+| Alembic revision mismatch | Database is unversioned | Run `alembic stamp head` on existing databases or `alembic upgrade head` on clean databases. |

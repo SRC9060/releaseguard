@@ -233,6 +233,8 @@ def list_incidents(
     status_filter: str | None = Query(None, alias="status"),
     severity_filter: str | None = Query(None, alias="severity"),
     environment_filter: str | None = Query(None, alias="environment"),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -253,7 +255,7 @@ def list_incidents(
     if environment_filter:
         query = query.filter(Incident.environment == environment_filter.strip().lower())
 
-    incidents = query.order_by(desc(Incident.created_at)).all()
+    incidents = query.order_by(desc(Incident.created_at), desc(Incident.id)).offset(offset).limit(limit).all()
     return [_format_incident_response(inc, include_details=False, db=db) for inc in incidents]
 
 

@@ -60,7 +60,23 @@ async function request(endpoint, options = {}) {
       } catch {
         // Non-JSON response
       }
-      const message = errorData?.detail || `API request failed with status ${response.status}`;
+
+      if (response.status === 401 && token) {
+        clearAuthToken();
+        window.dispatchEvent(new CustomEvent('releaseguard:auth_expired'));
+      }
+
+      let message;
+      if (typeof errorData?.detail === 'string') {
+        message = errorData.detail;
+      } else if (Array.isArray(errorData?.detail)) {
+        message = errorData.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ');
+      } else if (errorData?.detail) {
+        message = JSON.stringify(errorData.detail);
+      } else {
+        message = `API request failed with status ${response.status}`;
+      }
+
       throw new ApiError(message, response.status, errorData);
     }
 

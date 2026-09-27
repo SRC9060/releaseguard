@@ -10,12 +10,13 @@ from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.models import Membership, Tenant, User
 
-JWT_SECRET = os.getenv("JWT_SECRET", "releaseguard-super-secret-jwt-key-2026")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))  # 24 hours
+JWT_SECRET = settings.JWT_SECRET
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+JWT_EXPIRATION_MINUTES = settings.JWT_EXPIRATION_MINUTES
 
 security_bearer = HTTPBearer(auto_error=False)
 

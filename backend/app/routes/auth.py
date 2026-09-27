@@ -116,15 +116,26 @@ def register_user(payload: UserRegister, db: Session = Depends(get_db)):
     )
 
 
+from app.auth_limiter import auth_limiter
+
+
 @router.post(
     "/login",
     response_model=TokenResponse,
 )
 def login_user(payload: UserLogin, db: Session = Depends(get_db)):
     email = payload.email.strip().lower()
+
+    if auth_limiter.is_locked(email):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Account temporarily locked. Please try again later.",
+        )
+
     user = db.query(User).filter(User.email == email).first()
 
     if user is None or not verify_password(payload.password, user.password_hash):
+        auth_limiter.record_failure(email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -138,6 +149,7 @@ def login_user(payload: UserLogin, db: Session = Depends(get_db)):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    auth_limiter.reset(email)
     token = create_access_token(user.id)
 
     return TokenResponse(
