@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Any
 import uuid
+from urllib.parse import urlparse
 
 import redis
 
@@ -49,7 +50,10 @@ class EventQueue:
             # Must verify connection; fail immediately if Redis is unreachable
             client.ping()
             self.client = client
-            logger.info("Connected to Redis at %s", url)
+            parsed = urlparse(url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 6379
+            logger.info("Connected to Redis at %s:%s", host, port)
 
         self._ensure_consumer_group()
 

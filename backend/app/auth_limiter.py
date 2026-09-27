@@ -3,6 +3,7 @@ import logging
 import threading
 import time
 from typing import Dict, Tuple
+from urllib.parse import urlparse
 
 import redis
 from app.config import settings
@@ -30,9 +31,12 @@ class AuthRateLimiter:
             client.ping()
             self.redis_client = client
         except Exception as exc:
+            parsed = urlparse(url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 6379
             if settings.ENVIRONMENT == "production":
                 raise RuntimeError(
-                    f"Production mode requires an operational Redis instance for distributed authentication rate limiting, but connection to {url} failed: {exc}"
+                    f"Production mode requires an operational Redis instance for distributed authentication rate limiting, but connection to {host}:{port} failed: {exc}"
                 )
             logger.warning("Redis unavailable for auth rate limiter in non-production environment; using in-memory fallback")
 

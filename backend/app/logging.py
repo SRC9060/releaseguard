@@ -9,22 +9,25 @@ request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id
 tenant_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default="")
 project_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("project_id", default="")
 
-# Regex pattern for sensitive patterns (passwords, api keys, bearer tokens)
+# Regex pattern for sensitive patterns (passwords, api keys, bearer tokens, connection URLs)
 SENSITIVE_PATTERNS = [
     re.compile(r'("?(?:password|password_hash|secret|token|api_key|authorization|bearer)"?\s*[:=]\s*["\'])([^"\']+)("?)', re.IGNORECASE),
     re.compile(r"(Bearer\s+)[A-Za-z0-9\-_\.]+", re.IGNORECASE),
     re.compile(r"(rg_live_)[a-f0-9]+", re.IGNORECASE),
+    re.compile(r'((?:redis|rediss|postgresql|postgres)://)(?:[^:@]+:[^@]+|:[^@]+)(@)', re.IGNORECASE),
 ]
 
 
 def redact_sensitive(text: str) -> str:
-    """Masks secret, API key, password, and token values in log text."""
+    """Masks secret, API key, password, token, and connection URL values in log text."""
     redacted = text
     for pattern in SENSITIVE_PATTERNS:
         if "Bearer" in pattern.pattern:
             redacted = pattern.sub(r"\1[REDACTED]", redacted)
         elif "rg_live_" in pattern.pattern:
             redacted = pattern.sub(r"\1[REDACTED]", redacted)
+        elif "://" in pattern.pattern:
+            redacted = pattern.sub(r"\1[REDACTED]\2", redacted)
         else:
             redacted = pattern.sub(r"\1[REDACTED]\3", redacted)
     return redacted

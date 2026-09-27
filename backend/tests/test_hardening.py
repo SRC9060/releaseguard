@@ -162,6 +162,12 @@ def test_secret_redaction_in_logs():
     assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xyz" not in redacted
     assert "[REDACTED]" in redacted
 
+    # Verify Redis and PostgreSQL connection URL password redaction
+    redis_log = "Connected to Redis at rediss://default:SuperSecretRedisToken123!@prod-cluster.internal:6379/0"
+    redacted_redis = redact_sensitive(redis_log)
+    assert "SuperSecretRedisToken123!" not in redacted_redis
+    assert "rediss://[REDACTED]@prod-cluster.internal:6379/0" in redacted_redis
+
 
 def test_database_rollback_on_session_error():
     """Verifies that an exception during DB session yields automatic rollback."""
