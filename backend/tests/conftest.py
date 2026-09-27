@@ -49,6 +49,20 @@ def clean_db(engine):
 
 
 @pytest.fixture
+def db_session(engine):
+    TestingSessionLocal = sessionmaker(
+        bind=engine,
+        autocommit=False,
+        autoflush=False,
+    )
+    session = TestingSessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@pytest.fixture
 def client(engine):
     TestingSessionLocal = sessionmaker(
         bind=engine,
@@ -67,3 +81,4 @@ def client(engine):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+

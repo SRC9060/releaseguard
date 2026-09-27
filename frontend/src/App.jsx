@@ -8,6 +8,8 @@ import IssuesPage from './pages/IssuesPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ReleasesPage from './pages/ReleasesPage';
 import FeatureFlagsPage from './pages/FeatureFlagsPage';
+import IncidentsPage from './pages/IncidentsPage';
+import IncidentDetailPage from './pages/IncidentDetailPage';
 import ComingSoonPage from './pages/ComingSoonPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -89,22 +91,14 @@ function App() {
             <Route path="/issues" element={<IssuesPage key={eventTriggerKey} />} />
             <Route path="/issues/:id" element={<IssueDetailPage />} />
 
-            {/* Active Releases & Feature Flags */}
+            {/* Active Releases, Feature Flags, and Incidents */}
             <Route path="/releases" element={<ReleasesPage />} />
             <Route path="/feature-flags" element={<FeatureFlagsPage />} />
             <Route path="/flags" element={<Navigate to="/feature-flags" replace />} />
+            <Route path="/incidents" element={<IncidentsPage />} />
+            <Route path="/incidents/:id" element={<IncidentDetailPage />} />
 
             {/* Coming Soon Sections */}
-            <Route
-              path="/incidents"
-              element={
-                <ComingSoonPage
-                  title="Incident Management"
-                  description="Correlate active error surges into actionable incidents with automated PagerDuty / Slack notifications."
-                  roadmapVersion="v0.3"
-                />
-              }
-            />
             <Route
               path="/projects"
               element={

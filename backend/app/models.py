@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
+import secrets
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -91,6 +92,7 @@ class Project(Base):
     tenant = relationship("Tenant", back_populates="projects")
     issues = relationship("Issue", back_populates="project", cascade="all, delete-orphan")
     events = relationship("ErrorEvent", back_populates="project", cascade="all, delete-orphan")
+    incidents = relationship("Incident", back_populates="project", cascade="all, delete-orphan")
 
 
 class Issue(Base):
@@ -269,3 +271,92 @@ class FlagAuditLog(Base):
     flag = relationship("FeatureFlag")
     environment = relationship("Environment")
     actor = relationship("User")
+
+
+# =========================================================================
+# Phase 9: Incident Response & Controlled Mitigation
+# =========================================================================
+
+class Incident(Base):
+    __tablename__ = "incidents"
+    __table_args__ = (
+        Index("ix_incidents_tenant_project", "tenant_id", "project_id"),
+        Index("ix_incidents_status_env", "project_id", "environment", "status"),
+        Index("ix_incidents_related_issue", "project_id", "related_issue_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    environment: Mapped[str] = mapped_column(String(50), nullable=False, default="production")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")  # low, medium, high, critical
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="triggered")  # triggered, investigating, mitigated, resolved, closed
+    related_issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id", ondelete="SET NULL"), nullable=True)
+    related_release_id: Mapped[int | None] = mapped_column(ForeignKey("releases.id", ondelete="SET NULL"), nullable=True)
+    related_feature_flag_id: Mapped[int | None] = mapped_column(ForeignKey("feature_flags.id", ondelete="SET NULL"), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    mitigated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    tenant = relationship("Tenant")
+    project = relationship("Project", back_populates="incidents")
+    related_issue = relationship("Issue")
+    related_release = relationship("Release")
+    related_feature_flag = relationship("FeatureFlag")
+    creator = relationship("User", foreign_keys=[created_by])
+    assignee = relationship("User", foreign_keys=[assigned_to])
+    events = relationship("IncidentEvent", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentEvent.created_at.asc()")
+    mitigations = relationship("IncidentMitigation", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentMitigation.created_at.desc()")
+
+
+class IncidentEvent(Base):
+    __tablename__ = "incident_events"
+    __table_args__ = (
+        Index("ix_incident_events_incident", "incident_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    incident = relationship("Incident", back_populates="events")
+    actor = relationship("User")
+
+
+class IncidentMitigation(Base):
+    __tablename__ = "incident_mitigations"
+    __table_args__ = (
+        Index("ix_incident_mitigations_incident", "incident_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    action_type: Mapped[str] = mapped_column(String(50), nullable=False, default="kill_feature_flag")
+    target_flag_id: Mapped[int | None] = mapped_column(ForeignKey("feature_flags.id", ondelete="SET NULL"), nullable=True)
+    target_environment_id: Mapped[int | None] = mapped_column(ForeignKey("environments.id", ondelete="SET NULL"), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")  # pending, approved, executed, failed, rejected
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    execution_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    incident = relationship("Incident", back_populates="mitigations")
+    target_flag = relationship("FeatureFlag")
+    target_environment = relationship("Environment")
+    approver = relationship("User", foreign_keys=[approved_by])
+

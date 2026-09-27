@@ -244,6 +244,51 @@ export const api = {
     return request(`/api/v1/config/${projectIdentifier}/${environmentKey}${query}`);
   },
 
+  // Phase 9: Incidents & Mitigation
+  getIncidents: (tenantId, projectId, filters = {}) => {
+    const params = new URLSearchParams();
+    if (filters.status) params.append('status', filters.status);
+    if (filters.severity) params.append('severity', filters.severity);
+    if (filters.environment) params.append('environment', filters.environment);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents${qs}`);
+  },
+  getIncident: (tenantId, projectId, incidentId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}`),
+  createIncident: (tenantId, projectId, incidentData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents`, {
+      method: 'POST',
+      body: JSON.stringify(incidentData),
+    }),
+  updateIncident: (tenantId, projectId, incidentId, updateData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updateData),
+    }),
+  getIncidentTimeline: (tenantId, projectId, incidentId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/timeline`),
+  addIncidentTimelineNote: (tenantId, projectId, incidentId, noteData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/timeline`, {
+      method: 'POST',
+      body: JSON.stringify(noteData),
+    }),
+  approveMitigation: (tenantId, projectId, incidentId, mitigationId) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/mitigations/${mitigationId}/approve`,
+      {
+        method: 'POST',
+      }
+    ),
+  detectSpike: (tenantId, projectId, issueId, environment = 'production', autoCreate = true) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/detect-spike?issue_id=${issueId}&environment=${encodeURIComponent(
+        environment
+      )}&auto_create_incident=${autoCreate}`,
+      {
+        method: 'POST',
+      }
+    ),
+
   // Legacy fallback routes (for unauthenticated prototype tests)
   getProjects: () => request('/api/v1/projects'),
   getProject: (projectId) => request(`/api/v1/projects/${projectId}`),

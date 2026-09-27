@@ -20,7 +20,7 @@ const NAV_ITEMS = [
   { name: 'Issues', path: '/issues', icon: AlertOctagon, isFunctional: true },
   { name: 'Releases', path: '/releases', icon: GitBranch, isFunctional: true },
   { name: 'Feature Flags', path: '/feature-flags', icon: Sliders, isFunctional: true },
-  { name: 'Incidents', path: '/incidents', icon: Flame, isFunctional: false },
+  { name: 'Incidents', path: '/incidents', icon: Flame, isFunctional: true },
   { name: 'Projects', path: '/projects', icon: FolderGit2, isFunctional: false },
   { name: 'Settings', path: '/settings', icon: Settings, isFunctional: false },
 ];

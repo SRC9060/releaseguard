@@ -318,3 +318,122 @@ class FlagEvaluationResult(BaseModel):
 class ConfigDocumentResponse(BaseModel):
     environment: str
     flags: dict[str, FlagEvaluationResult]
+
+
+# =========================================================================
+# Phase 9: Incident Response & Controlled Mitigation Schemas
+# =========================================================================
+
+class IncidentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    environment: str = "production"
+    severity: str = "medium"  # low, medium, high, critical
+    related_issue_id: int | None = None
+    related_release_id: int | None = None
+    related_feature_flag_id: int | None = None
+    assigned_to: int | None = None
+
+
+class IncidentUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    description: str | None = None
+    severity: str | None = None
+    status: str | None = None  # triggered, investigating, mitigated, resolved, closed
+    assigned_to: int | None = None
+    related_issue_id: int | None = None
+    related_release_id: int | None = None
+    related_feature_flag_id: int | None = None
+
+
+class IncidentEventCreate(BaseModel):
+    event_type: str = "note_added"
+    message: str = Field(min_length=1)
+    metadata: dict | None = None
+
+
+class IncidentEventResponse(BaseModel):
+    id: int
+    incident_id: int
+    actor_id: int | None = None
+    actor_email: str | None = None
+    event_type: str
+    message: str
+    metadata: dict | None = None
+    created_at: datetime
+
+
+class IncidentMitigationResponse(BaseModel):
+    id: int
+    incident_id: int
+    action_type: str
+    target_flag_id: int | None = None
+    target_flag_key: str | None = None
+    target_environment_id: int | None = None
+    target_environment_key: str | None = None
+    reason: str
+    confidence: float
+    status: str
+    approved_by: int | None = None
+    approved_by_email: str | None = None
+    approved_at: datetime | None = None
+    executed_at: datetime | None = None
+    execution_result: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CorrelatedChange(BaseModel):
+    type: str  # "release" or "feature_flag"
+    item_id: int
+    title: str
+    description: str | None = None
+    relationship: str  # "correlated release", "recent flag change", "possible contributor"
+    changed_at: datetime
+    metadata: dict = {}
+
+
+class IncidentResponse(BaseModel):
+    id: int
+    tenant_id: int
+    project_id: int
+    environment: str
+    title: str
+    description: str | None = None
+    severity: str
+    status: str
+    related_issue_id: int | None = None
+    related_issue_title: str | None = None
+    related_release_id: int | None = None
+    related_release_version: str | None = None
+    related_feature_flag_id: int | None = None
+    related_feature_flag_key: str | None = None
+    created_by: int | None = None
+    created_by_email: str | None = None
+    assigned_to: int | None = None
+    assigned_to_email: str | None = None
+    started_at: datetime
+    mitigated_at: datetime | None = None
+    resolved_at: datetime | None = None
+    closed_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    timeline: list[IncidentEventResponse] = []
+    mitigations: list[IncidentMitigationResponse] = []
+    correlated_changes: list[CorrelatedChange] = []
+
+
+class SpikeDetectionResult(BaseModel):
+    is_spike: bool
+    issue_id: int
+    environment: str
+    current_count: int
+    baseline_count: int
+    current_rate: float
+    baseline_rate: float
+    spike_ratio: float
+    threshold: float
+    incident_created: bool = False
+    incident_id: int | None = None
+    reason: str | None = None
+

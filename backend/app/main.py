@@ -6,6 +6,7 @@ from app.db import Base, engine
 from app.routes.auth import router as auth_router
 from app.routes.events import router as events_router
 from app.routes.flags import router as flags_router
+from app.routes.incidents import router as incidents_router
 from app.routes.projects import router as projects_router
 from app.routes.releases import router as releases_router
 from app.routes.tenants import router as tenants_router
@@ -58,12 +59,20 @@ if engine.dialect.name == "postgresql":
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_flag_settings_env ON flag_settings (environment_id);"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_flag_audit_logs_flag ON flag_audit_logs (flag_id, created_at);"))
 
+        # Phase 9 indexes
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_incidents_tenant_project ON incidents (tenant_id, project_id);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_incidents_status_env ON incidents (project_id, environment, status);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_incidents_related_issue ON incidents (project_id, related_issue_id, created_at);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_incident_events_incident ON incident_events (incident_id, created_at);"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_incident_mitigations_incident ON incident_mitigations (incident_id, status);"))
+
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(tenants_router, prefix="/api/v1")
 app.include_router(projects_router, prefix="/api/v1")
 app.include_router(events_router, prefix="/api/v1")
 app.include_router(releases_router, prefix="/api/v1")
 app.include_router(flags_router, prefix="/api/v1")
+app.include_router(incidents_router, prefix="/api/v1")
 
 
 @app.get("/health")
