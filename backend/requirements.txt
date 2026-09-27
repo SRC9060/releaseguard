@@ -9,3 +9,4 @@ python-dotenv
 pyjwt
 bcrypt
 alembic
+redis>=5.0,<7
