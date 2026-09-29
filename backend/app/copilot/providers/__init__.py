@@ -47,7 +47,11 @@ def get_copilot_provider(provider_name: Optional[str] = None) -> BaseCopilotProv
             return GeminiCopilotProvider(
                 api_key=settings.GEMINI_API_KEY,
                 model_name=settings.COPILOT_MODEL or "gemini-3.8-flash",
+                fallback_model=settings.COPILOT_FALLBACK_MODEL,
                 timeout_seconds=settings.COPILOT_TIMEOUT_SECONDS,
+                max_retries=settings.COPILOT_MAX_RETRIES,
+                retry_base_delay_seconds=settings.COPILOT_RETRY_BASE_DELAY_SECONDS,
+                retry_max_delay_seconds=settings.COPILOT_RETRY_MAX_DELAY_SECONDS,
             )
         # Fallback to mock in dev/test if key not configured
         return MockCopilotProvider(
