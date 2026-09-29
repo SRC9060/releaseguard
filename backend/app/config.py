@@ -49,8 +49,10 @@ class Settings:
         # AI Incident Copilot
         self.COPILOT_PROVIDER: str = os.getenv("COPILOT_PROVIDER", "gemini").lower()
         self.COPILOT_MODEL: str = os.getenv("COPILOT_MODEL", "gemini-3.8-flash")
-        self.COPILOT_FALLBACK_MODEL: str | None = os.getenv("COPILOT_FALLBACK_MODEL", "gemini-3.7-flash")
-        self.COPILOT_MAX_RETRIES: int = int(os.getenv("COPILOT_MAX_RETRIES", "3"))
+        raw_fallback = os.getenv("COPILOT_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+        self.COPILOT_FALLBACK_MODEL: str | None = raw_fallback.strip() if raw_fallback and raw_fallback.strip().lower() not in ("", "none", "disabled", "false") else None
+        self.COPILOT_MAX_RETRIES: int = int(os.getenv("COPILOT_MAX_RETRIES", "1"))
+        self.COPILOT_FALLBACK_MAX_RETRIES: int = int(os.getenv("COPILOT_FALLBACK_MAX_RETRIES", "0"))
         self.COPILOT_RETRY_BASE_DELAY_SECONDS: float = float(os.getenv("COPILOT_RETRY_BASE_DELAY_SECONDS", "1.0"))
         self.COPILOT_RETRY_MAX_DELAY_SECONDS: float = float(os.getenv("COPILOT_RETRY_MAX_DELAY_SECONDS", "8.0"))
         self.GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")

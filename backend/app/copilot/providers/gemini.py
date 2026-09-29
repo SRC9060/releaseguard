@@ -41,9 +41,10 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         self,
         api_key: str,
         model_name: str = "gemini-3.8-flash",
-        fallback_model: Optional[str] = "gemini-3.7-flash",
+        fallback_model: Optional[str] = "gemini-3.5-flash-lite",
         timeout_seconds: float = 30.0,
-        max_retries: int = 3,
+        max_retries: int = 1,
+        fallback_max_retries: int = 0,
         retry_base_delay_seconds: float = 1.0,
         retry_max_delay_seconds: float = 8.0,
         base_url: str = "https://generativelanguage.googleapis.com/v1beta",
@@ -56,6 +57,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             self.fallback_model = None
 
         self.max_retries = max(0, max_retries)
+        self.fallback_max_retries = max(0, fallback_max_retries)
         self.retry_base_delay_seconds = max(0.0, retry_base_delay_seconds)
         self.retry_max_delay_seconds = max(0.0, retry_max_delay_seconds)
         self.base_url = base_url.rstrip("/")
@@ -113,6 +115,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         system_prompt: str,
         user_prompt: str,
         deadline: float,
+        model_retries: Optional[int] = None,
     ) -> tuple[Optional[CopilotAnalysisPayload], Optional[int], Optional[Exception]]:
         """
         Executes requests for a specific model with exponential backoff and jitter.
@@ -143,7 +146,8 @@ class GeminiCopilotProvider(BaseCopilotProvider):
 
         last_status: Optional[int] = None
         last_exc: Optional[Exception] = None
-        max_attempts = 1 + self.max_retries
+        effective_retries = self.max_retries if model_retries is None else max(0, model_retries)
+        max_attempts = 1 + effective_retries
 
         for attempt_idx in range(max_attempts):
             retry_attempt = attempt_idx + 1
@@ -187,13 +191,13 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                     raise CopilotProviderError(f"Gemini API returned HTTP {response.status_code}")
 
                 # Transient error: retry if attempts remain
-                if attempt_idx < self.max_retries:
+                if attempt_idx < effective_retries:
                     logger.warning(
                         "Gemini transient failure: status=%d model=%s attempt=%d/%d",
                         response.status_code,
                         model_name,
                         retry_attempt,
-                        self.max_retries,
+                        effective_retries,
                     )
                     logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
@@ -210,12 +214,12 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                 raise
             except httpx.TimeoutException as exc:
                 last_exc = CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
-                if attempt_idx < self.max_retries:
+                if attempt_idx < effective_retries:
                     logger.warning(
                         "Gemini transient failure: status=timeout model=%s attempt=%d/%d",
                         model_name,
                         retry_attempt,
-                        self.max_retries,
+                        effective_retries,
                     )
                     logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
@@ -228,13 +232,13 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                     break
             except httpx.RequestError as exc:
                 last_exc = CopilotProviderError(f"Network error communicating with Gemini API: {type(exc).__name__}")
-                if attempt_idx < self.max_retries:
+                if attempt_idx < effective_retries:
                     logger.warning(
                         "Gemini transient failure: error=%s model=%s attempt=%d/%d",
                         type(exc).__name__,
                         model_name,
                         retry_attempt,
-                        self.max_retries,
+                        effective_retries,
                     )
                     logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
@@ -255,12 +259,13 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         self.model_name = self.primary_model_name
         deadline = time.monotonic() + self.timeout_seconds
 
-        # 1. Attempt primary model
+        # 1. Attempt primary model (with self.max_retries, default 1)
         payload, last_status, last_exc = await self._execute_model(
             model_name=self.primary_model_name,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             deadline=deadline,
+            model_retries=self.max_retries,
         )
 
         if payload is not None:
@@ -268,10 +273,14 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             return payload
 
         # 2. Check if eligible for fallback model
+        is_transient_failure = (
+            last_status in self.FALLBACK_STATUS_CODES
+            or isinstance(last_exc, CopilotTimeoutError)
+        )
         if (
             self.fallback_model
             and self.fallback_model != self.primary_model_name
-            and last_status in self.FALLBACK_STATUS_CODES
+            and is_transient_failure
             and (deadline - time.monotonic()) > 0
         ):
             logger.warning(
@@ -283,6 +292,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 deadline=deadline,
+                model_retries=self.fallback_max_retries,
             )
             if fallback_payload is not None:
                 self.model_name = self.fallback_model

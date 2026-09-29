@@ -50,6 +50,7 @@ def get_copilot_provider(provider_name: Optional[str] = None) -> BaseCopilotProv
                 fallback_model=settings.COPILOT_FALLBACK_MODEL,
                 timeout_seconds=settings.COPILOT_TIMEOUT_SECONDS,
                 max_retries=settings.COPILOT_MAX_RETRIES,
+                fallback_max_retries=settings.COPILOT_FALLBACK_MAX_RETRIES,
                 retry_base_delay_seconds=settings.COPILOT_RETRY_BASE_DELAY_SECONDS,
                 retry_max_delay_seconds=settings.COPILOT_RETRY_MAX_DELAY_SECONDS,
             )

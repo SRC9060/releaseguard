@@ -152,10 +152,16 @@ def test_get_copilot_provider_fallback_to_mock(monkeypatch):
 def test_gemini_provider_default_model_is_gemini_3_8_flash(monkeypatch):
     monkeypatch.setattr("app.config.settings.COPILOT_PROVIDER", "gemini")
     monkeypatch.setattr("app.config.settings.COPILOT_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr("app.config.settings.COPILOT_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+    monkeypatch.setattr("app.config.settings.COPILOT_MAX_RETRIES", 1)
+    monkeypatch.setattr("app.config.settings.COPILOT_FALLBACK_MAX_RETRIES", 0)
     monkeypatch.setattr("app.config.settings.GEMINI_API_KEY", "test_gemini_key_12345")
     provider = get_copilot_provider()
     assert isinstance(provider, GeminiCopilotProvider)
     assert provider.model_name == "gemini-3.8-flash"
+    assert provider.fallback_model == "gemini-3.5-flash-lite"
+    assert provider.max_retries == 1
+    assert provider.fallback_max_retries == 0
     assert provider.provider_name == "gemini"
 
 
@@ -765,12 +771,11 @@ def test_gemini_503_all_retries_exhausted(monkeypatch):
 def test_gemini_fallback_model_success_after_primary_503_exhaustion(monkeypatch):
     captured_calls = []
     responses = [
-        # Primary attempts (max_retries=2 -> 1 initial + 2 retries = 3 calls)
+        # Primary attempts (max_retries=1 -> 1 initial + 1 retry = 2 calls)
         MockHttpxResponse(503, text="High demand primary 1"),
         MockHttpxResponse(503, text="High demand primary 2"),
-        MockHttpxResponse(503, text="High demand primary 3"),
         # Fallback attempt 1 -> succeeds
-        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Success on fallback 3.7")),
+        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Success on fallback 3.5")),
     ]
     monkeypatch.setattr(
         "httpx.AsyncClient",
@@ -781,21 +786,98 @@ def test_gemini_fallback_model_success_after_primary_503_exhaustion(monkeypatch)
     provider = GeminiCopilotProvider(
         api_key="test_api_key_abc",
         model_name="gemini-3.8-flash",
-        fallback_model="gemini-3.7-flash",
-        max_retries=2,
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
         retry_base_delay_seconds=0.001,
     )
     result = asyncio.run(provider.analyze("system prompt", "user prompt"))
-    assert result.summary == "Success on fallback 3.7"
-    assert len(captured_calls) == 4
-    # First 3 calls went to gemini-3.8-flash
+    assert result.summary == "Success on fallback 3.5"
+    # Exactly 3 calls: 2 for primary, 1 for fallback
+    assert len(captured_calls) == 3
+    # First 2 calls went to gemini-3.8-flash
     assert "gemini-3.8-flash" in captured_calls[0]["url"]
     assert "gemini-3.8-flash" in captured_calls[1]["url"]
-    assert "gemini-3.8-flash" in captured_calls[2]["url"]
-    # 4th call went to gemini-3.7-flash
-    assert "gemini-3.7-flash" in captured_calls[3]["url"]
+    # 3rd call went to gemini-3.5-flash-lite
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
     # Model name updated to fallback model
-    assert provider.model_name == "gemini-3.7-flash"
+    assert provider.model_name == "gemini-3.5-flash-lite"
+
+
+def test_gemini_fallback_503_fails_safely_no_retries(monkeypatch):
+    """
+    If primary returns 503 (exhausting 1 retry) and fallback also returns 503,
+    fallback gets exactly 1 attempt (0 retries), safely returning 503 error without burning deadline.
+    """
+    captured_calls = []
+    responses = [
+        # Primary: 1 initial + 1 retry = 2 calls
+        MockHttpxResponse(503, text="Primary 503 attempt 1"),
+        MockHttpxResponse(503, text="Primary 503 attempt 2"),
+        # Fallback: exactly 1 call (fallback_max_retries=0)
+        MockHttpxResponse(503, text="Fallback 503 attempt 1"),
+        # Extra response that should NEVER be called
+        MockHttpxResponse(503, text="Should not be reached"),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test_api_key_abc",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+    with pytest.raises(CopilotProviderError) as exc_info:
+        asyncio.run(provider.analyze("system prompt", "user prompt"))
+
+    assert "503" in str(exc_info.value)
+    # Exactly 3 total requests made: 2 primary + 1 fallback (fallback is not retried!)
+    assert len(captured_calls) == 3
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert "gemini-3.8-flash" in captured_calls[1]["url"]
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
+
+
+def test_gemini_fallback_timeout_no_retries(monkeypatch):
+    """
+    If primary exhausts retries and fallback times out, fallback is not retried.
+    """
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Primary 503 attempt 1"),
+        MockHttpxResponse(503, text="Primary 503 attempt 2"),
+        httpx.ReadTimeout("Fallback timeout"),
+        # Should not be called
+        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Never reached")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test_api_key_abc",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+    with pytest.raises(CopilotTimeoutError):
+        asyncio.run(provider.analyze("system prompt", "user prompt"))
+
+    # Exactly 3 calls
+    assert len(captured_calls) == 3
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert "gemini-3.8-flash" in captured_calls[1]["url"]
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
 
 
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404])
@@ -813,8 +895,9 @@ def test_gemini_fallback_not_used_for_client_errors(monkeypatch, status_code):
     provider = GeminiCopilotProvider(
         api_key="test_api_key_abc",
         model_name="gemini-3.8-flash",
-        fallback_model="gemini-3.7-flash",
-        max_retries=3,
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
         retry_base_delay_seconds=0.001,
     )
     with pytest.raises(CopilotProviderError) as exc_info:
@@ -909,8 +992,8 @@ def test_gemini_successful_analysis_persisted_with_actual_model_name(client: Tes
         # Primary gemini-3.8-flash exhausts retries (max_retries=1 -> 2 attempts)
         MockHttpxResponse(503, text="503 Primary Busy 1"),
         MockHttpxResponse(503, text="503 Primary Busy 2"),
-        # Fallback gemini-3.7-flash succeeds
-        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Fallback 3.7 analysis")),
+        # Fallback gemini-3.5-flash-lite succeeds (1 attempt, 0 retries)
+        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Fallback 3.5 analysis")),
     ]
     monkeypatch.setattr(
         "httpx.AsyncClient",
@@ -921,8 +1004,9 @@ def test_gemini_successful_analysis_persisted_with_actual_model_name(client: Tes
     provider = GeminiCopilotProvider(
         api_key="test_gemini_key_persist",
         model_name="gemini-3.8-flash",
-        fallback_model="gemini-3.7-flash",
+        fallback_model="gemini-3.5-flash-lite",
         max_retries=1,
+        fallback_max_retries=0,
         retry_base_delay_seconds=0.001,
     )
 
@@ -931,8 +1015,8 @@ def test_gemini_successful_analysis_persisted_with_actual_model_name(client: Tes
         assert resp.status_code == 200
         data = resp.json()
         assert data["provider"] == "gemini"
-        assert data["model"] == "gemini-3.7-flash"
-        assert data["analysis"]["summary"] == "Fallback 3.7 analysis"
+        assert data["model"] == "gemini-3.5-flash-lite"
+        assert data["analysis"]["summary"] == "Fallback 3.5 analysis"
 
     # Verify database persistence has the fallback model name
     persisted = (
@@ -943,7 +1027,51 @@ def test_gemini_successful_analysis_persisted_with_actual_model_name(client: Tes
     )
     assert persisted is not None
     assert persisted.provider == "gemini"
-    assert persisted.model == "gemini-3.7-flash"
+    assert persisted.model == "gemini-3.5-flash-lite"
+
+
+def test_gemini_primary_success_persisted_with_primary_model_name(client: TestClient, db_session, monkeypatch):
+    _, member_token, tenant, proj, incident = setup_copilot_test_env(client, db_session)
+    url = f"/api/v1/tenants/{tenant['id']}/projects/{proj['id']}/incidents/{incident['id']}/copilot/analyze"
+
+    captured_calls = []
+    responses = [
+        # Primary gemini-3.8-flash: initial attempt fails with 503, retry succeeds
+        MockHttpxResponse(503, text="503 Primary Busy 1"),
+        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Primary 3.8 analysis")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test_gemini_key_persist",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    with patch("app.copilot.service.get_copilot_provider", return_value=provider):
+        resp = client.post(url, json={"force_refresh": True}, headers=auth_headers(member_token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "gemini"
+        assert data["model"] == "gemini-3.8-flash"
+        assert data["analysis"]["summary"] == "Primary 3.8 analysis"
+
+    persisted = (
+        db_session.query(IncidentCopilotAnalysis)
+        .filter(IncidentCopilotAnalysis.incident_id == incident["id"])
+        .order_by(IncidentCopilotAnalysis.created_at.desc())
+        .first()
+    )
+    assert persisted is not None
+    assert persisted.provider == "gemini"
+    assert persisted.model == "gemini-3.8-flash"
 
 
 def test_gemini_deadline_timeout_enforced(monkeypatch):
@@ -1208,8 +1336,9 @@ def test_copilot_response_deliberately_malformed_enums_rejected(monkeypatch):
     provider = GeminiCopilotProvider(
         api_key="test_api_key_malformed",
         model_name="gemini-3.8-flash",
-        fallback_model="gemini-3.7-flash",
-        max_retries=3,
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
     )
     with pytest.raises(CopilotResponseParseError):
         asyncio.run(provider.analyze("system prompt", "user prompt"))
