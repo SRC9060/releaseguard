@@ -13,11 +13,20 @@ Authenticated tenant-scoped endpoints:
 
 from datetime import datetime
 import json
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from app.auth import get_current_user
+from app.copilot import (
+    CopilotAnalysisRequest,
+    CopilotAnalysisResponse,
+    CopilotProviderError,
+    CopilotResponseParseError,
+    CopilotService,
+    CopilotTimeoutError,
+)
 from app.db import get_db
 from app.incidents import CorrelationService, MitigationService, SpikeDetectionService
 from app.models import (
@@ -955,3 +964,100 @@ def detect_spike_endpoint(
         incident_id=incident_id,
         reason=reason,
     )
+
+
+# =========================================================================
+# Phase 15A: AI Incident Copilot
+# =========================================================================
+
+@router.post("/{incident_id}/copilot/analyze", response_model=CopilotAnalysisResponse)
+async def analyze_incident_with_copilot(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    payload: Optional[CopilotAnalysisRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Analyzes an incident using AI Copilot.
+    - Tenant and project scoped (strictly authorized).
+    - Accessible to members, admins, and owners (min_role="member").
+    - Protects against prompt injection and scrubs credentials.
+    - Caches results by context hash unless force_refresh=True.
+    - Provider failures return descriptive HTTP errors without modifying or failing the incident.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    force_refresh = payload.force_refresh if payload else False
+
+    try:
+        result = await CopilotService.analyze_incident(
+            incident=incident,
+            db=db,
+            force_refresh=force_refresh,
+        )
+        return result
+    except CopilotTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"AI Copilot provider timed out: {exc}",
+        )
+    except CopilotResponseParseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI Copilot provider returned invalid structured response: {exc}",
+        )
+    except CopilotProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI Copilot provider unavailable: {exc}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected error during AI Copilot analysis",
+        )
+
+
+@router.get("/{incident_id}/copilot/latest", response_model=Optional[CopilotAnalysisResponse])
+def get_latest_copilot_analysis(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves the latest persisted AI analysis for an incident.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    result = CopilotService.get_latest_analysis(incident_id=incident.id, db=db)
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No AI Copilot analysis found for this incident")
+    return result

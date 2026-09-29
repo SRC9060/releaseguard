@@ -46,6 +46,14 @@ class Settings:
         self.AUTH_MAX_ATTEMPTS: int = int(os.getenv("AUTH_MAX_ATTEMPTS", "5"))
         self.AUTH_LOCKOUT_SECONDS: int = int(os.getenv("AUTH_LOCKOUT_SECONDS", "900"))  # 15 minutes
 
+        # AI Incident Copilot
+        self.COPILOT_PROVIDER: str = os.getenv("COPILOT_PROVIDER", "gemini").lower()
+        self.COPILOT_MODEL: str = os.getenv("COPILOT_MODEL", "gemini-2.5-flash")
+        self.GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+        self.OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
+        self.OPENAI_BASE_URL: str | None = os.getenv("OPENAI_BASE_URL")
+        self.COPILOT_TIMEOUT_SECONDS: float = float(os.getenv("COPILOT_TIMEOUT_SECONDS", "30.0"))
+
     def validate_production(self) -> None:
         """Validates critical security configuration for production deployments."""
         if self.ENVIRONMENT == "production":

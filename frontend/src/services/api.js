@@ -49,10 +49,12 @@ class ApiError extends Error {
 }
 
 export function getAuthToken() {
+  if (typeof localStorage === 'undefined') return null;
   return localStorage.getItem(TOKEN_KEY);
 }
 
 export function setAuthToken(token) {
+  if (typeof localStorage === 'undefined') return;
   if (token) {
     localStorage.setItem(TOKEN_KEY, token);
   } else {
@@ -61,6 +63,7 @@ export function setAuthToken(token) {
 }
 
 export function clearAuthToken() {
+  if (typeof localStorage === 'undefined') return;
   localStorage.removeItem(TOKEN_KEY);
 }
 
@@ -95,7 +98,9 @@ async function request(endpoint, options = {}) {
 
       if (response.status === 401 && token) {
         clearAuthToken();
-        window.dispatchEvent(new CustomEvent('releaseguard:auth_expired'));
+        if (typeof window !== 'undefined' && window.dispatchEvent) {
+          window.dispatchEvent(new CustomEvent('releaseguard:auth_expired'));
+        }
       }
 
       let message;
@@ -392,6 +397,22 @@ export const api = {
       {
         method: 'POST',
       }
+    ),
+
+  // Phase 15: AI Incident Copilot
+  analyzeIncidentCopilot: (tenantId, projectId, incidentId, options = {}) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/copilot/analyze`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          force_refresh: Boolean(options?.force_refresh),
+        }),
+      }
+    ),
+  getLatestIncidentCopilot: (tenantId, projectId, incidentId) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/copilot/latest`
     ),
 
   // Legacy fallback routes (for unauthenticated prototype tests)

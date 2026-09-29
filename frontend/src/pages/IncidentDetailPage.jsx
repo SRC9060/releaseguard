@@ -28,6 +28,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { formatRelativeTime, formatExactTimestamp } from '../utils/formatters';
+import IncidentCopilotSection from '../components/IncidentCopilotSection';
 
 function formatDuration(startedAt, resolvedAt) {
   if (!startedAt) return null;
@@ -555,6 +556,13 @@ export default function IncidentDetailPage() {
               </div>
             </div>
           </div>
+
+          {/* AI INCIDENT COPILOT */}
+          <IncidentCopilotSection
+            tenantId={selectedTenant?.id}
+            projectId={currentProject?.id}
+            incidentId={incident.id}
+          />
 
           {/* SECTION 2: LINKED ISSUES */}
           <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-3">

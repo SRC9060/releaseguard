@@ -318,6 +318,7 @@ class Incident(Base):
     events = relationship("IncidentEvent", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentEvent.created_at.asc()")
     mitigations = relationship("IncidentMitigation", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentMitigation.created_at.desc()")
     linked_issues = relationship("IncidentIssue", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentIssue.created_at.asc()")
+    copilot_analyses = relationship("IncidentCopilotAnalysis", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentCopilotAnalysis.created_at.desc()")
 
 
 class IncidentIssue(Base):
@@ -383,3 +384,19 @@ class IncidentMitigation(Base):
     approver = relationship("User", foreign_keys=[approved_by])
 
 
+class IncidentCopilotAnalysis(Base):
+    __tablename__ = "incident_copilot_analyses"
+    __table_args__ = (
+        Index("ix_copilot_analyses_incident", "incident_id", "created_at"),
+        Index("ix_copilot_analyses_incident_hash", "incident_id", "context_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    analysis_json: Mapped[str] = mapped_column(Text, nullable=False)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    incident = relationship("Incident", back_populates="copilot_analyses")
