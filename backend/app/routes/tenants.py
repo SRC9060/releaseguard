@@ -621,7 +621,7 @@ def send_project_test_event(
         status="pending",
         event_id=event_id,
         issue_id=None,
-        timestamp=now.isoformat(),
+        timestamp=now,
         message="Verification event enqueued for worker processing",
     )
 
@@ -655,7 +655,7 @@ def get_project_test_event(
         status="completed",
         event_id=event_id,
         issue_id=error_event.issue_id,
-        timestamp=error_event.received_at.isoformat(),
+        timestamp=error_event.received_at,
         message="Integration connected successfully",
     )
 

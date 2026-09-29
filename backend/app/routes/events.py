@@ -71,21 +71,21 @@ def compute_timeseries(
         step = timedelta(minutes=1)
         end_time = now.replace(second=0, microsecond=0)
         start_time = end_time - timedelta(minutes=bucket_count - 1)
-        fmt = "%Y-%m-%dT%H:%M:00"
+        fmt = "%Y-%m-%dT%H:%M:00Z"
     elif time_range == "24h":
         granularity = "hour"
         bucket_count = 24
         step = timedelta(hours=1)
         end_time = now.replace(minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(hours=bucket_count - 1)
-        fmt = "%Y-%m-%dT%H:00:00"
+        fmt = "%Y-%m-%dT%H:00:00Z"
     else:  # "7d"
         granularity = "day"
         bucket_count = 7
         step = timedelta(days=1)
         end_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(days=bucket_count - 1)
-        fmt = "%Y-%m-%dT00:00:00"
+        fmt = "%Y-%m-%dT00:00:00Z"
 
     buckets_dict: dict[str, int] = {}
     for i in range(bucket_count):
@@ -119,7 +119,13 @@ def compute_timeseries(
         if isinstance(bucket_val, datetime):
             key = bucket_val.strftime(fmt)
         else:
-            key = str(bucket_val)
+            try:
+                dt_val = datetime.fromisoformat(str(bucket_val).replace("Z", "+00:00"))
+                key = dt_val.strftime(fmt)
+            except Exception:
+                key = str(bucket_val)
+                if not key.endswith("Z"):
+                    key = f"{key}Z"
         if key in buckets_dict:
             buckets_dict[key] += cnt
         else:

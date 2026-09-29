@@ -31,6 +31,7 @@ import api from '../services/api';
 import {
   formatRelativeTime,
   formatExactTimestamp,
+  parseUtcDate,
   formatNumber,
   formatFingerprint,
 } from '../utils/formatters';
@@ -271,7 +272,7 @@ export function IssueDetailPage() {
   // Format chart buckets for rendering
   const formattedBuckets =
     trendData?.buckets?.map((b) => {
-      const dt = new Date(b.timestamp);
+      const dt = parseUtcDate(b.timestamp);
       let label = '';
       if (trendRange === '1h') {
         label = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });

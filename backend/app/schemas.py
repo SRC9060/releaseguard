@@ -1,7 +1,39 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel as _PydanticBaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
+
+
+class BaseModel(_PydanticBaseModel):
+    """
+    ReleaseGuard base model ensuring all datetimes are explicitly timezone-aware
+    in UTC and serialized to ISO 8601 with the 'Z' suffix.
+    """
+
+    @field_validator("*", mode="after", check_fields=False)
+    @classmethod
+    def _ensure_utc_aware(cls, v):
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        return v
+
+    @field_serializer("*", when_used="always", check_fields=False)
+    def _serialize_utc_datetime(self, v):
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            else:
+                v = v.astimezone(timezone.utc)
+            return v.isoformat().replace("+00:00", "Z")
+        return v
 
 
 # =========================================================================
@@ -136,7 +168,7 @@ class TestEventResponse(BaseModel):
     status: str
     event_id: str
     issue_id: int | None = None
-    timestamp: str | None = None
+    timestamp: datetime | str | None = None
     message: str
 
 

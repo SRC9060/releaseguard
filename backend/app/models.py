@@ -155,7 +155,7 @@ class Release(Base):
     version: Mapped[str] = mapped_column(String(100), nullable=False)
     commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     environment: Mapped[str] = mapped_column(String(50), nullable=False, default="production")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project = relationship("Project", backref="releases")
 
@@ -171,7 +171,7 @@ class Environment(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     key: Mapped[str] = mapped_column(String(50), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project = relationship("Project", backref="environments")
 
@@ -189,8 +189,8 @@ class FeatureFlag(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     project = relationship("Project", backref="feature_flags")
     settings = relationship("FlagSetting", back_populates="flag", cascade="all, delete-orphan")
@@ -208,8 +208,8 @@ class FlagSetting(Base):
     environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     default_variant: Mapped[str] = mapped_column(String(50), default="off", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     flag = relationship("FeatureFlag", back_populates="settings")
     environment = relationship("Environment")
@@ -229,7 +229,7 @@ class Rollout(Base):
     environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id", ondelete="CASCADE"), nullable=False)
     percentage: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     salt: Mapped[str] = mapped_column(String(32), default=lambda: secrets.token_hex(8), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     setting = relationship("FlagSetting", back_populates="rollout")
 
@@ -266,7 +266,7 @@ class FlagAuditLog(Base):
     action: Mapped[str] = mapped_column(String(50), nullable=False)
     before_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     after_state: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     flag = relationship("FeatureFlag")
     environment = relationship("Environment")
