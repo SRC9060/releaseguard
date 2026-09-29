@@ -4,7 +4,39 @@
  * Supports JWT authentication and multi-tenant scoping.
  */
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+export const PRODUCTION_API_URL = 'https://releaseguard-api-0jbc.onrender.com';
+export const LOCAL_API_URL = 'http://127.0.0.1:8000';
+
+const env =
+  typeof import.meta !== 'undefined' && import.meta?.env
+    ? import.meta.env
+    : typeof process !== 'undefined' && process?.env
+      ? process.env
+      : {};
+
+export function resolveApiBaseUrl(customEnv = null) {
+  const currentEnv = customEnv || env;
+  if (currentEnv.VITE_API_BASE_URL) {
+    return currentEnv.VITE_API_BASE_URL;
+  }
+  const isProd = Boolean(
+    currentEnv.PROD ||
+    currentEnv.NODE_ENV === 'production' ||
+    (typeof window !== 'undefined' &&
+      window.location &&
+      window.location.hostname &&
+      !window.location.hostname.includes('localhost') &&
+      window.location.hostname !== '127.0.0.1')
+  );
+  return isProd ? PRODUCTION_API_URL : LOCAL_API_URL;
+}
+
+const BASE_URL = resolveApiBaseUrl();
+
+export function getApiBaseUrl() {
+  return BASE_URL;
+}
+
 const TOKEN_KEY = 'releaseguard_auth_token';
 
 class ApiError extends Error {
@@ -381,6 +413,9 @@ export const api = {
       body: JSON.stringify(eventData),
     });
   },
+
+  // Base URL Helper
+  getBaseUrl: getApiBaseUrl,
 };
 
 export { BASE_URL, ApiError };

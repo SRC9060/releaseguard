@@ -2,7 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useProject } from '../context/ProjectContext';
-import api from '../services/api';
+import api, { BASE_URL } from '../services/api';
+import {
+  generatePythonEnvSnippet,
+  generatePythonInitSnippet,
+  PYTHON_INSTALL_SNIPPET,
+  PYTHON_CAPTURE_SNIPPET,
+} from '../utils/snippets';
 import {
   FolderGit2,
   Key,
@@ -338,32 +344,22 @@ export default function ProjectDetailPage() {
 
   const isCurrentActive = selectedProject?.id === project.id;
 
-  const pythonInstallSnippet = `pip install releaseguard-sdk`;
+  const pythonInstallSnippet = PYTHON_INSTALL_SNIPPET;
 
-  const pythonEnvSnippet = `# In your production environment (.env / system variables)
-RELEASEGUARD_API_KEY="${project.api_key || 'rg_live_••••••••••••'}"
-RELEASEGUARD_ENDPOINT="${window.location.origin.includes('localhost') ? 'http://127.0.0.1:8000' : window.location.origin}"
-RELEASEGUARD_ENVIRONMENT="production"`;
+  const pythonEnvSnippet = generatePythonEnvSnippet({
+    apiKey: project.api_key,
+    endpoint: BASE_URL,
+    environment: 'production',
+  });
 
-  const pythonInitSnippet = `import os
-import releaseguard_sdk
+  const pythonInitSnippet = generatePythonInitSnippet({
+    projectId: project.id,
+    endpoint: BASE_URL,
+    release: 'v1.0.0',
+    environment: 'production',
+  });
 
-# Initialize ReleaseGuard at application startup
-releaseguard_sdk.init(
-    project_id=${project.id},
-    base_url=os.environ.get("RELEASEGUARD_ENDPOINT", "http://127.0.0.1:8000"),
-    api_key=os.environ["RELEASEGUARD_API_KEY"],
-    release=os.environ.get("RELEASEGUARD_RELEASE", "v1.0.0"),
-    environment=os.environ.get("RELEASEGUARD_ENVIRONMENT", "production"),
-)`;
-
-  const pythonCaptureSnippet = `try:
-    # Execute critical business logic
-    process_transaction()
-except Exception:
-    # Captures stack trace, exception type, and metadata asynchronously
-    releaseguard_sdk.capture_exception()
-    raise`;
+  const pythonCaptureSnippet = PYTHON_CAPTURE_SNIPPET;
 
   return (
     <div className="space-y-6">
@@ -674,6 +670,10 @@ except Exception:
                 <p className="text-xs text-slate-400 mt-1 max-w-lg">
                   Send an authenticated test error event directly through the ReleaseGuard ingestion pipeline (FastAPI → Redis Streams → Background Worker → PostgreSQL).
                 </p>
+                <div className="mt-2 text-xs font-mono text-slate-400 flex items-center gap-2">
+                  <span className="text-slate-500">Backend Endpoint:</span>
+                  <span className="px-2 py-0.5 rounded bg-slate-950 text-indigo-300 border border-slate-800">{BASE_URL}</span>
+                </div>
               </div>
 
               <button
