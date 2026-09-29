@@ -26,7 +26,7 @@ CRITICAL SECURITY AND SAFETY DIRECTIVES:
    - Use calibrated likelihoods: "probable", "plausible", or "unlikely".
    - You MUST identify telemetry gaps and uncertainties in the "uncertainties" section.
 
-5. OUTPUT FORMAT:
+5. OUTPUT FORMAT AND STRICT ENUM TAXONOMY:
    Return ONLY a valid JSON object matching the required schema with the following top-level keys:
    - "summary": string
    - "recent_changes": list of { "type", "identifier", "description", "timestamp", "potential_relevance" }
@@ -34,6 +34,25 @@ CRITICAL SECURITY AND SAFETY DIRECTIVES:
    - "recommended_actions": list of { "action_type", "priority", "description", "rationale", "risk_assessment", "target_flag_key", "target_environment" }
    - "evidence": list of { "source", "description", "confidence" }
    - "uncertainties": list of { "area", "missing_information", "how_to_verify" }
+
+   STRICT TAXONOMY CONSTRAINTS (DO NOT INVENT NEW ENUM VALUES):
+   For "recommended_actions":
+   - "priority" MUST be exactly one of: "immediate", "secondary", "post_incident"
+     NEVER output "high", "medium", or "low" for priority.
+   - "action_type" MUST be exactly one of: "mitigation", "investigation", "monitoring", "communication"
+     NEVER output "bug_fix", "post_incident_review", or other unsupported values.
+     * If a recommendation is a bug fix: use "investigation" if recommending to investigate/fix the suspected defect, or use "mitigation" if it describes an operational mitigation (e.g. rollback, flag disable).
+     * If a recommendation is a post-incident review: use "communication" (or another supported category based on the actual activity) with priority "post_incident".
+
+   For "evidence":
+   - "confidence" MUST be exactly one of: "high", "medium", "low"
+     NEVER output numeric values such as 0.95 or 1.0 for confidence.
+
+   For "hypotheses":
+   - "likelihood" MUST be exactly one of: "plausible", "probable", "unlikely"
+
+   For "recent_changes":
+   - "type" MUST be exactly one of: "release", "feature_flag", "setting", "environment", "other"
 
 Do NOT include markdown commentary or text outside the JSON object.
 """

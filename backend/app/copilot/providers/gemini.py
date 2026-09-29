@@ -20,7 +20,7 @@ from app.copilot.providers.base import (
     CopilotResponseParseError,
     CopilotTimeoutError,
 )
-from app.copilot.schemas import CopilotAnalysisPayload
+from app.copilot.schemas import COPILOT_RESPONSE_SCHEMA, CopilotAnalysisPayload
 from app.logging import redact_sensitive
 
 logger = logging.getLogger("releaseguard.copilot.gemini")
@@ -132,6 +132,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             ],
             "generationConfig": {
                 "response_mime_type": "application/json",
+                "response_schema": COPILOT_RESPONSE_SCHEMA,
                 "temperature": 0.2,
             }
         }

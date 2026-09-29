@@ -37,8 +37,9 @@ from app.copilot.providers import (
     MockCopilotProvider,
     get_copilot_provider,
 )
+from pydantic import ValidationError
 from app.logging import redact_sensitive
-from app.copilot.schemas import CopilotAnalysisPayload, Hypothesis
+from app.copilot.schemas import COPILOT_RESPONSE_SCHEMA, CopilotAnalysisPayload, Hypothesis
 from app.copilot.service import CopilotService
 from app.models import (
     ErrorEvent,
@@ -975,5 +976,259 @@ def test_gemini_deadline_timeout_enforced(monkeypatch):
     )
     with pytest.raises(CopilotTimeoutError):
         asyncio.run(provider.analyze("system prompt", "user prompt"))
+
+
+# =========================================================================
+# 10. Gemini Structured Output Schema & Strict Taxonomy Validation
+# =========================================================================
+
+def test_gemini_request_payload_structured_output_schema(monkeypatch):
+    """
+    Verifies that the Gemini REST request payload explicitly provides generationConfig
+    with response_mime_type application/json and the response_schema enforcing exact enum values.
+    """
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(200, make_valid_gemini_candidate_payload("Structured output test")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+
+    provider = GeminiCopilotProvider(
+        api_key="test_api_key_schema",
+        model_name="gemini-3.8-flash",
+    )
+    result = asyncio.run(provider.analyze("system prompt", "user prompt"))
+    assert result.summary == "Structured output test"
+    assert len(captured_calls) == 1
+
+    payload = captured_calls[0]["json"]
+    assert "generationConfig" in payload
+    gen_config = payload["generationConfig"]
+    assert gen_config["response_mime_type"] == "application/json"
+    assert "response_schema" in gen_config
+    schema = gen_config["response_schema"]
+
+    # Verify root type and required keys
+    assert schema["type"] == "object"
+    assert "properties" in schema
+    assert "recommended_actions" in schema["properties"]
+    assert "evidence" in schema["properties"]
+    assert "hypotheses" in schema["properties"]
+    assert "recent_changes" in schema["properties"]
+
+    # Verify exact enum constraints on recommended_actions
+    rec_props = schema["properties"]["recommended_actions"]["items"]["properties"]
+    assert rec_props["priority"]["enum"] == ["immediate", "secondary", "post_incident"]
+    assert rec_props["action_type"]["enum"] == ["mitigation", "investigation", "monitoring", "communication"]
+
+    # Verify exact enum constraints on evidence confidence
+    ev_props = schema["properties"]["evidence"]["items"]["properties"]
+    assert ev_props["confidence"]["enum"] == ["high", "medium", "low"]
+
+    # Verify exact enum constraints on hypotheses likelihood
+    hyp_props = schema["properties"]["hypotheses"]["items"]["properties"]
+    assert hyp_props["likelihood"]["enum"] == ["plausible", "probable", "unlikely"]
+
+    # Verify exact enum constraints on recent_changes type
+    rc_props = schema["properties"]["recent_changes"]["items"]["properties"]
+    assert rc_props["type"]["enum"] == ["release", "feature_flag", "setting", "environment", "other"]
+
+
+def test_copilot_response_valid_enum_values_accepted(monkeypatch):
+    """
+    Verifies that a valid Gemini response adhering strictly to the enum taxonomy
+    passes both provider execution and Pydantic schema validation.
+    """
+    valid_payload = {
+        "summary": "Valid taxonomy analysis",
+        "recent_changes": [
+            {
+                "type": "release",
+                "identifier": "v1.2.0",
+                "description": "Payment service update",
+                "timestamp": "2026-09-29T10:00:00Z",
+                "potential_relevance": "Deploy occurred right before errors spiked",
+            }
+        ],
+        "hypotheses": [
+            {
+                "id": "H1",
+                "title": "Payment gateway timeout",
+                "explanation": "Timeout observed during payment call",
+                "evidence": ["HTTP 504 in checkout logs"],
+                "inference": ["Third-party API latency increased"],
+                "likelihood": "probable",
+            }
+        ],
+        "recommended_actions": [
+            {
+                "action_type": "mitigation",
+                "priority": "immediate",
+                "description": "Roll back payment service to v1.1.9",
+                "rationale": "Restores previous stable behavior",
+                "risk_assessment": "Low blast radius",
+            },
+            {
+                "action_type": "investigation",
+                "priority": "secondary",
+                "description": "Inspect payment gateway latency metrics",
+                "rationale": "Identify upstream timeout trigger",
+                "risk_assessment": "Read-only query",
+            },
+            {
+                "action_type": "communication",
+                "priority": "post_incident",
+                "description": "Notify customer success about payment incidents",
+                "rationale": "Inform stakeholders",
+                "risk_assessment": "None",
+            },
+        ],
+        "evidence": [
+            {
+                "source": "error_event",
+                "description": "HTTP 504 gateway timeout",
+                "confidence": "high",
+            },
+            {
+                "source": "release",
+                "description": "v1.2.0 deployed 5m prior",
+                "confidence": "medium",
+            },
+        ],
+        "uncertainties": [
+            {
+                "area": "Network latency",
+                "missing_information": "Downstream provider status page",
+                "how_to_verify": "Check third-party incident dashboard",
+            }
+        ],
+    }
+
+    # Verify Pydantic validation passes directly
+    parsed = CopilotAnalysisPayload.model_validate(valid_payload)
+    assert parsed.summary == "Valid taxonomy analysis"
+    assert parsed.recommended_actions[0].priority == "immediate"
+    assert parsed.recommended_actions[0].action_type == "mitigation"
+    assert parsed.evidence[0].confidence == "high"
+
+    # Verify provider execution parses it cleanly
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(200, {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": json.dumps(valid_payload)}]
+                    }
+                }
+            ]
+        })
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    provider = GeminiCopilotProvider(
+        api_key="test_api_key_valid",
+        model_name="gemini-3.8-flash",
+    )
+    result = asyncio.run(provider.analyze("system prompt", "user prompt"))
+    assert result.summary == "Valid taxonomy analysis"
+    assert result.recommended_actions[0].priority == "immediate"
+
+
+def test_copilot_response_deliberately_malformed_enums_rejected(monkeypatch):
+    """
+    Verifies that a deliberately malformed response matching observed production errors:
+      - priority = "high"
+      - action_type = "bug_fix"
+      - confidence = 1.0
+    is strictly rejected by Pydantic validation and GeminiCopilotProvider (raising CopilotResponseParseError).
+    Guarantees ReleaseGuard does NOT silently map bad values.
+    """
+    malformed_payload = {
+        "summary": "Malformed production error reproduction",
+        "recent_changes": [],
+        "hypotheses": [
+            {
+                "id": "H1",
+                "title": "Bug in tax calculator",
+                "explanation": "Calculation error",
+                "evidence": ["Stack trace line 42"],
+                "inference": ["Division by zero"],
+                "likelihood": "plausible",
+            }
+        ],
+        "recommended_actions": [
+            {
+                "action_type": "bug_fix",  # Invalid! Allowed: mitigation, investigation, monitoring, communication
+                "priority": "high",       # Invalid! Allowed: immediate, secondary, post_incident
+                "description": "Fix bug in billing/tax.py",
+                "rationale": "Prevent zero division",
+                "risk_assessment": "Requires deployment",
+            }
+        ],
+        "evidence": [
+            {
+                "source": "error_event",
+                "description": "ZeroDivisionError",
+                "confidence": 1.0,         # Invalid! Allowed: "high", "medium", "low"
+            }
+        ],
+        "uncertainties": [],
+    }
+
+    # 1. Pydantic must reject it
+    raw_json = json.dumps(malformed_payload)
+    with pytest.raises(ValidationError) as exc_info:
+        CopilotAnalysisPayload.model_validate_json(raw_json)
+    err_str = str(exc_info.value)
+    assert "priority" in err_str or "action_type" in err_str or "confidence" in err_str
+
+    # 2. Provider must raise CopilotResponseParseError and NOT fallback or retry
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(200, {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": raw_json}]
+                    }
+                }
+            ]
+        })
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    provider = GeminiCopilotProvider(
+        api_key="test_api_key_malformed",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.7-flash",
+        max_retries=3,
+    )
+    with pytest.raises(CopilotResponseParseError):
+        asyncio.run(provider.analyze("system prompt", "user prompt"))
+
+    # Strictly 1 call made - no retry and no fallback on parse errors
+    assert len(captured_calls) == 1
+
+
+def test_copilot_system_prompt_contains_explicit_enum_taxonomy():
+    """
+    Verifies that the system prompt explicitly documents all allowed and forbidden enum values
+    to ensure the model is given strict, unambiguous generation instructions.
+    """
+    assert 'priority" MUST be exactly one of: "immediate", "secondary", "post_incident"' in COPILOT_SYSTEM_PROMPT
+    assert 'action_type" MUST be exactly one of: "mitigation", "investigation", "monitoring", "communication"' in COPILOT_SYSTEM_PROMPT
+    assert 'confidence" MUST be exactly one of: "high", "medium", "low"' in COPILOT_SYSTEM_PROMPT
+    assert 'NEVER output "high", "medium", or "low" for priority' in COPILOT_SYSTEM_PROMPT
+    assert 'NEVER output "bug_fix", "post_incident_review"' in COPILOT_SYSTEM_PROMPT
+    assert 'NEVER output numeric values such as 0.95 or 1.0 for confidence' in COPILOT_SYSTEM_PROMPT
+
 
 
