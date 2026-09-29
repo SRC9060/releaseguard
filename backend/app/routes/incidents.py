@@ -23,6 +23,7 @@ from app.incidents import CorrelationService, MitigationService, SpikeDetectionS
 from app.models import (
     Incident,
     IncidentEvent,
+    IncidentIssue,
     IncidentMitigation,
     Issue,
     Release,
@@ -33,12 +34,15 @@ from app.models import (
 from app.routes.tenants import get_tenant_project_or_404
 from app.schemas import (
     CorrelatedChange,
+    IncidentApplyMitigationInput,
     IncidentCreate,
     IncidentEventCreate,
     IncidentEventResponse,
+    IncidentLinkIssueInput,
     IncidentMitigationResponse,
     IncidentResponse,
     IncidentUpdate,
+    LinkedIssueResponse,
     SpikeDetectionResult,
 )
 
@@ -55,6 +59,24 @@ def _format_incident_response(
     related_flag_key = incident.related_feature_flag.key if incident.related_feature_flag else None
     creator_email = incident.creator.email if incident.creator else None
     assignee_email = incident.assignee.email if incident.assignee else None
+
+    # Linked issues
+    linked_issues_list: list[LinkedIssueResponse] = []
+    if incident.linked_issues:
+        for link in incident.linked_issues:
+            if link.issue:
+                cnt = getattr(link.issue, "count", 0) or getattr(link.issue, "event_count", 0) or 0
+                linked_issues_list.append(
+                    LinkedIssueResponse(
+                        id=link.id,
+                        issue_id=link.issue_id,
+                        title=link.issue.title,
+                        status=link.issue.status,
+                        fingerprint=link.issue.fingerprint,
+                        event_count=cnt,
+                        created_at=link.created_at,
+                    )
+                )
 
     timeline_items: list[IncidentEventResponse] = []
     mitigation_items: list[IncidentMitigationResponse] = []
@@ -92,6 +114,13 @@ def _format_incident_response(
                 except Exception:
                     exec_res = {"raw": m.execution_result}
 
+            prev_state = None
+            if m.previous_state:
+                try:
+                    prev_state = json.loads(m.previous_state)
+                except Exception:
+                    pass
+
             mitigation_items.append(
                 IncidentMitigationResponse(
                     id=m.id,
@@ -109,6 +138,7 @@ def _format_incident_response(
                     approved_at=m.approved_at,
                     executed_at=m.executed_at,
                     execution_result=exec_res,
+                    previous_state=prev_state,
                     created_at=m.created_at,
                     updated_at=m.updated_at,
                 )
@@ -150,6 +180,8 @@ def _format_incident_response(
         closed_at=incident.closed_at,
         created_at=incident.created_at,
         updated_at=incident.updated_at,
+        linked_issues=linked_issues_list,
+        linked_issue_count=len(linked_issues_list),
         timeline=timeline_items,
         mitigations=mitigation_items,
         correlated_changes=correlated_changes,
@@ -188,6 +220,8 @@ def create_incident(
         if not flag:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Related feature flag not found for this project")
 
+    initial_status = payload.status.strip().lower() if payload.status else "triggered"
+
     incident = Incident(
         tenant_id=tenant_id,
         project_id=project.id,
@@ -195,7 +229,7 @@ def create_incident(
         title=payload.title.strip(),
         description=payload.description.strip() if payload.description else None,
         severity=payload.severity.strip().lower(),
-        status="triggered",
+        status=initial_status,
         related_issue_id=payload.related_issue_id,
         related_release_id=payload.related_release_id,
         related_feature_flag_id=payload.related_feature_flag_id,
@@ -206,13 +240,22 @@ def create_incident(
     db.add(incident)
     db.flush()
 
+    # If an issue was specified at creation, link it in incident_issues
+    if payload.related_issue_id:
+        link = IncidentIssue(
+            incident_id=incident.id,
+            issue_id=payload.related_issue_id,
+            created_at=utcnow(),
+        )
+        db.add(link)
+
     # Write initial timeline event
     initial_event = IncidentEvent(
         incident_id=incident.id,
         actor_id=current_user.id,
         event_type="incident_created",
-        message=f"Incident '{incident.title}' was triggered with {incident.severity.upper()} severity.",
-        metadata_json=json.dumps({"environment": env, "severity": incident.severity}),
+        message=f"Incident '{incident.title}' was created with {incident.severity.upper()} severity.",
+        metadata_json=json.dumps({"environment": env, "severity": incident.severity, "status": incident.status}),
         created_at=utcnow(),
     )
     db.add(initial_event)
@@ -519,6 +562,287 @@ def approve_mitigation(
 
     try:
         result = MitigationService.approve_and_execute_mitigation(
+            incident_id=incident.id,
+            mitigation_id=mitigation_id,
+            actor_id=current_user.id,
+            db=db,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{incident_id}/resolve", response_model=IncidentResponse)
+def resolve_incident_endpoint(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Explicitly marks an incident as resolved.
+    Requires owner or admin permissions.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    now = utcnow()
+    old_status = incident.status
+    incident.status = "resolved"
+    if not incident.resolved_at:
+        incident.resolved_at = now
+    incident.updated_at = now
+
+    if old_status != "resolved":
+        db.add(
+            IncidentEvent(
+                incident_id=incident.id,
+                actor_id=current_user.id,
+                event_type="incident_resolved",
+                message=f"Incident resolved by {current_user.email}.",
+                created_at=now,
+            )
+        )
+
+    db.commit()
+    db.refresh(incident)
+
+    return _format_incident_response(incident, include_details=True, db=db)
+
+
+@router.post("/{incident_id}/issues", response_model=IncidentResponse, status_code=status.HTTP_201_CREATED)
+def link_issue_to_incident(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    payload: IncidentLinkIssueInput,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Links an existing issue to the incident.
+    Verifies tenant and project isolation, prevents duplicate links, and records an activity event.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    issue = (
+        db.query(Issue)
+        .filter(
+            Issue.id == payload.issue_id,
+            Issue.project_id == project.id,
+        )
+        .first()
+    )
+    if not issue:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Issue not found in this project")
+
+    # Prevent duplicate link
+    existing_link = (
+        db.query(IncidentIssue)
+        .filter(
+            IncidentIssue.incident_id == incident.id,
+            IncidentIssue.issue_id == issue.id,
+        )
+        .first()
+    )
+    if existing_link:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Issue is already linked to this incident")
+
+    link = IncidentIssue(
+        incident_id=incident.id,
+        issue_id=issue.id,
+        created_at=utcnow(),
+    )
+    db.add(link)
+
+    if not incident.related_issue_id:
+        incident.related_issue_id = issue.id
+
+    now = utcnow()
+    incident.updated_at = now
+
+    event = IncidentEvent(
+        incident_id=incident.id,
+        actor_id=current_user.id,
+        event_type="issue_linked",
+        message=f"Issue #{issue.id} ('{issue.title}') was linked to the incident by {current_user.email}.",
+        metadata_json=json.dumps({"issue_id": issue.id, "title": issue.title}),
+        created_at=now,
+    )
+    db.add(event)
+
+    db.commit()
+    db.refresh(incident)
+
+    return _format_incident_response(incident, include_details=True, db=db)
+
+
+@router.delete("/{incident_id}/issues/{issue_id}", response_model=IncidentResponse)
+def unlink_issue_from_incident(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    issue_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Unlinks an issue from the incident.
+    The issue entity remains completely intact.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    link = (
+        db.query(IncidentIssue)
+        .filter(
+            IncidentIssue.incident_id == incident.id,
+            IncidentIssue.issue_id == issue_id,
+        )
+        .first()
+    )
+    if not link:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Issue link not found for this incident")
+
+    db.delete(link)
+
+    if incident.related_issue_id == issue_id:
+        remaining = (
+            db.query(IncidentIssue)
+            .filter(
+                IncidentIssue.incident_id == incident.id,
+                IncidentIssue.issue_id != issue_id,
+            )
+            .first()
+        )
+        incident.related_issue_id = remaining.issue_id if remaining else None
+
+    now = utcnow()
+    incident.updated_at = now
+
+    event = IncidentEvent(
+        incident_id=incident.id,
+        actor_id=current_user.id,
+        event_type="issue_unlinked",
+        message=f"Issue #{issue_id} was unlinked from the incident by {current_user.email}.",
+        metadata_json=json.dumps({"issue_id": issue_id}),
+        created_at=now,
+    )
+    db.add(event)
+
+    db.commit()
+    db.refresh(incident)
+
+    return _format_incident_response(incident, include_details=True, db=db)
+
+
+@router.post("/{incident_id}/mitigations", status_code=status.HTTP_200_OK)
+def apply_mitigation_endpoint(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    payload: IncidentApplyMitigationInput,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Applies a reversible feature-flag kill mitigation directly to an incident.
+    Captures pre-mitigation state, disables flag, sets rollout to 0%,
+    writes audit log and timeline event.
+    Requires admin or owner role.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    try:
+        result = MitigationService.apply_mitigation(
+            incident_id=incident.id,
+            target_flag_id=payload.target_flag_id,
+            target_environment_id=payload.target_environment_id,
+            reason=payload.reason,
+            actor_id=current_user.id,
+            db=db,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/{incident_id}/mitigations/{mitigation_id}/revert", status_code=status.HTTP_200_OK)
+def revert_mitigation_endpoint(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    mitigation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Reverts an executed feature-flag mitigation, restoring previous flag configuration.
+    Requires admin or owner role.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="admin")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    try:
+        result = MitigationService.revert_mitigation(
             incident_id=incident.id,
             mitigation_id=mitigation_id,
             actor_id=current_user.id,

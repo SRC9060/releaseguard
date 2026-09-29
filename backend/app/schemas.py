@@ -386,6 +386,7 @@ class IncidentCreate(BaseModel):
     description: str | None = None
     environment: str = "production"
     severity: str = "medium"  # low, medium, high, critical
+    status: str | None = None  # open, monitoring, resolved (or triggered for legacy compat)
     related_issue_id: int | None = None
     related_release_id: int | None = None
     related_feature_flag_id: int | None = None
@@ -401,6 +402,26 @@ class IncidentUpdate(BaseModel):
     related_issue_id: int | None = None
     related_release_id: int | None = None
     related_feature_flag_id: int | None = None
+
+
+class LinkedIssueResponse(BaseModel):
+    id: int
+    issue_id: int
+    title: str
+    status: str
+    fingerprint: str
+    event_count: int = 0
+    created_at: datetime
+
+
+class IncidentLinkIssueInput(BaseModel):
+    issue_id: int
+
+
+class IncidentApplyMitigationInput(BaseModel):
+    target_flag_id: int
+    target_environment_id: int | None = None
+    reason: str | None = None
 
 
 class IncidentEventCreate(BaseModel):
@@ -436,6 +457,7 @@ class IncidentMitigationResponse(BaseModel):
     approved_at: datetime | None = None
     executed_at: datetime | None = None
     execution_result: dict | None = None
+    previous_state: dict | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -475,9 +497,12 @@ class IncidentResponse(BaseModel):
     closed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    linked_issues: list[LinkedIssueResponse] = []
+    linked_issue_count: int = 0
     timeline: list[IncidentEventResponse] = []
     mitigations: list[IncidentMitigationResponse] = []
     correlated_changes: list[CorrelatedChange] = []
+
 
 
 class SpikeDetectionResult(BaseModel):

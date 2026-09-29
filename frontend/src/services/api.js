@@ -352,6 +352,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(noteData),
     }),
+  resolveIncident: (tenantId, projectId, incidentId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/resolve`, {
+      method: 'POST',
+    }),
+  linkIncidentIssue: (tenantId, projectId, incidentId, issueId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/issues`, {
+      method: 'POST',
+      body: JSON.stringify({ issue_id: issueId }),
+    }),
+  unlinkIncidentIssue: (tenantId, projectId, incidentId, issueId) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/issues/${issueId}`, {
+      method: 'DELETE',
+    }),
+  applyIncidentMitigation: (tenantId, projectId, incidentId, mitigationData) =>
+    request(`/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/mitigations`, {
+      method: 'POST',
+      body: JSON.stringify(mitigationData),
+    }),
+  revertIncidentMitigation: (tenantId, projectId, incidentId, mitigationId) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/mitigations/${mitigationId}/revert`,
+      {
+        method: 'POST',
+      }
+    ),
   approveMitigation: (tenantId, projectId, incidentId, mitigationId) =>
     request(
       `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/mitigations/${mitigationId}/approve`,

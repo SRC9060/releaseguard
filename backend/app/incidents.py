@@ -464,6 +464,7 @@ class MitigationService:
         mitigation.approved_by = actor_id
         mitigation.approved_at = now
         mitigation.executed_at = now
+        mitigation.previous_state = json.dumps(before_state)
         mitigation.execution_result = json.dumps({
             "status": "success",
             "action": "kill_feature_flag",
@@ -521,3 +522,298 @@ class MitigationService:
             "executed_at": now.isoformat(),
             "approved_by": actor_id,
         }
+
+    @staticmethod
+    def apply_mitigation(
+        incident_id: int,
+        target_flag_id: int,
+        target_environment_id: int | None,
+        reason: str | None,
+        actor_id: int,
+        db: Session,
+    ) -> dict[str, Any]:
+        """
+        Directly applies a feature-flag kill mitigation to an incident.
+        Captures previous state, disables flag, sets rollout to 0%,
+        records flag audit log and incident activity timeline event.
+        """
+        incident = db.query(Incident).filter(Incident.id == incident_id).first()
+        if not incident:
+            raise ValueError(f"Incident #{incident_id} not found")
+
+        actor = db.query(User).filter(User.id == actor_id).first()
+        actor_email = actor.email if actor else f"user_{actor_id}"
+
+        target_flag = (
+            db.query(FeatureFlag)
+            .filter(FeatureFlag.id == target_flag_id, FeatureFlag.project_id == incident.project_id)
+            .first()
+        )
+        if not target_flag:
+            raise ValueError(f"Target feature flag #{target_flag_id} not found in this project")
+
+        if target_environment_id is not None:
+            env_obj = (
+                db.query(Environment)
+                .filter(Environment.id == target_environment_id, Environment.project_id == incident.project_id)
+                .first()
+            )
+        else:
+            env_obj = (
+                db.query(Environment)
+                .filter(Environment.key == incident.environment, Environment.project_id == incident.project_id)
+                .first()
+            )
+
+        if not env_obj:
+            raise ValueError("Target environment not found for this project")
+
+        flag_setting = (
+            db.query(FlagSetting)
+            .filter(FlagSetting.flag_id == target_flag.id, FlagSetting.environment_id == env_obj.id)
+            .first()
+        )
+        if not flag_setting:
+            raise ValueError(f"Flag setting for flag '{target_flag.key}' in environment '{env_obj.key}' not found")
+
+        now = utcnow()
+        before_state = {
+            "enabled": flag_setting.enabled,
+            "default_variant": flag_setting.default_variant,
+            "rollout_percentage": flag_setting.rollout.percentage if flag_setting.rollout else 0,
+        }
+
+        # Apply kill switch
+        flag_setting.enabled = False
+        if flag_setting.rollout:
+            flag_setting.rollout.percentage = 0
+
+        # Record Flag Audit Log
+        audit_log = FlagAuditLog(
+            flag_id=target_flag.id,
+            environment_id=env_obj.id,
+            actor_id=actor_id,
+            action="kill",
+            before_state=json.dumps(before_state),
+            after_state=json.dumps({"enabled": False, "rollout_percentage": 0, "killed_by_incident": incident.id}),
+            created_at=now,
+        )
+        db.add(audit_log)
+
+        # Create or update mitigation record
+        mitigation = IncidentMitigation(
+            incident_id=incident.id,
+            action_type="kill_feature_flag",
+            target_flag_id=target_flag.id,
+            target_environment_id=env_obj.id,
+            reason=reason or f"Emergency mitigation for incident #{incident.id}: Flag '{target_flag.key}' disabled.",
+            confidence=1.0,
+            status="executed",
+            approved_by=actor_id,
+            approved_at=now,
+            executed_at=now,
+            previous_state=json.dumps(before_state),
+            execution_result=json.dumps({
+                "status": "success",
+                "action": "kill_feature_flag",
+                "flag_id": target_flag.id,
+                "flag_key": target_flag.key,
+                "environment_id": env_obj.id,
+                "killed_at": now.isoformat(),
+            }),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(mitigation)
+
+        # Update Incident status
+        incident.status = "mitigated"
+        if not incident.mitigated_at:
+            incident.mitigated_at = now
+        incident.updated_at = now
+
+        # Add Timeline event
+        timeline_event = IncidentEvent(
+            incident_id=incident.id,
+            actor_id=actor_id,
+            event_type="mitigation_applied",
+            message=f"Mitigation applied: Feature flag '{target_flag.key}' killed (disabled, 0% rollout) by {actor_email}.",
+            metadata_json=json.dumps({
+                "flag_id": target_flag.id,
+                "flag_key": target_flag.key,
+                "environment": env_obj.key,
+                "previous_state": before_state,
+            }),
+            created_at=now,
+        )
+        db.add(timeline_event)
+
+        db.commit()
+
+        return {
+            "idempotent": False,
+            "status": "executed",
+            "mitigation_id": mitigation.id,
+            "incident_id": incident.id,
+            "flag_key": target_flag.key,
+            "message": f"Feature flag '{target_flag.key}' successfully killed.",
+            "executed_at": now.isoformat(),
+            "approved_by": actor_id,
+            "previous_state": before_state,
+        }
+
+    @staticmethod
+    def revert_mitigation(
+        incident_id: int,
+        mitigation_id: int,
+        actor_id: int,
+        db: Session,
+    ) -> dict[str, Any]:
+        """
+        Reverts an executed feature-flag mitigation. Restores flag enabled state
+        and rollout percentage to their exact pre-mitigation values.
+        """
+        mitigation = (
+            db.query(IncidentMitigation)
+            .filter(
+                IncidentMitigation.id == mitigation_id,
+                IncidentMitigation.incident_id == incident_id,
+            )
+            .first()
+        )
+        if not mitigation:
+            raise ValueError(f"Mitigation #{mitigation_id} not found for incident #{incident_id}")
+
+        incident = db.query(Incident).filter(Incident.id == incident_id).first()
+        if not incident:
+            raise ValueError(f"Incident #{incident_id} not found")
+
+        actor = db.query(User).filter(User.id == actor_id).first()
+        actor_email = actor.email if actor else f"user_{actor_id}"
+
+        if mitigation.status == "reverted":
+            return {
+                "idempotent": True,
+                "status": "reverted",
+                "mitigation_id": mitigation.id,
+                "incident_id": incident.id,
+                "message": "Mitigation was already reverted.",
+            }
+
+        if mitigation.status != "executed":
+            raise ValueError(f"Cannot revert mitigation #{mitigation_id} in '{mitigation.status}' status (must be executed).")
+
+        target_flag = db.query(FeatureFlag).filter(FeatureFlag.id == mitigation.target_flag_id).first()
+        if not target_flag:
+            raise ValueError(f"Target flag #{mitigation.target_flag_id} no longer exists")
+
+        flag_setting = (
+            db.query(FlagSetting)
+            .filter(
+                FlagSetting.flag_id == target_flag.id,
+                FlagSetting.environment_id == mitigation.target_environment_id,
+            )
+            .first()
+        )
+        if not flag_setting:
+            raise ValueError("Flag setting no longer exists")
+
+        # Parse pre-mitigation state
+        prev_state = None
+        if mitigation.previous_state:
+            try:
+                prev_state = json.loads(mitigation.previous_state)
+            except Exception:
+                pass
+
+        if not prev_state:
+            # Fallback to flag audit log
+            audit = (
+                db.query(FlagAuditLog)
+                .filter(
+                    FlagAuditLog.flag_id == target_flag.id,
+                    FlagAuditLog.environment_id == mitigation.target_environment_id,
+                    FlagAuditLog.action == "kill",
+                )
+                .order_by(desc(FlagAuditLog.created_at))
+                .first()
+            )
+            if audit and audit.before_state:
+                try:
+                    prev_state = json.loads(audit.before_state)
+                except Exception:
+                    pass
+
+        restored_enabled = prev_state.get("enabled", True) if prev_state else True
+        restored_rollout = prev_state.get("rollout_percentage", 100) if prev_state else 100
+
+        before_revert = {
+            "enabled": flag_setting.enabled,
+            "rollout_percentage": flag_setting.rollout.percentage if flag_setting.rollout else 0,
+        }
+
+        # Restore setting and rollout
+        flag_setting.enabled = restored_enabled
+        if flag_setting.rollout:
+            flag_setting.rollout.percentage = restored_rollout
+
+        now = utcnow()
+
+        # Audit log for restoration
+        db.add(
+            FlagAuditLog(
+                flag_id=target_flag.id,
+                environment_id=mitigation.target_environment_id,
+                actor_id=actor_id,
+                action="revert_mitigation",
+                before_state=json.dumps(before_revert),
+                after_state=json.dumps({
+                    "enabled": restored_enabled,
+                    "rollout_percentage": restored_rollout,
+                    "reverted_by_incident": incident.id,
+                    "mitigation_id": mitigation.id,
+                }),
+                created_at=now,
+            )
+        )
+
+        mitigation.status = "reverted"
+        mitigation.updated_at = now
+
+        # Add Timeline event
+        db.add(
+            IncidentEvent(
+                incident_id=incident.id,
+                actor_id=actor_id,
+                event_type="mitigation_reverted",
+                message=f"Mitigation #{mitigation.id} reverted by {actor_email}: Flag '{target_flag.key}' restored to previous state (enabled={restored_enabled}, rollout={restored_rollout}%).",
+                metadata_json=json.dumps({
+                    "mitigation_id": mitigation.id,
+                    "target_flag_id": target_flag.id,
+                    "target_flag_key": target_flag.key,
+                    "restored_state": {
+                        "enabled": restored_enabled,
+                        "rollout_percentage": restored_rollout,
+                    },
+                }),
+                created_at=now,
+            )
+        )
+
+        db.commit()
+
+        return {
+            "idempotent": False,
+            "status": "reverted",
+            "mitigation_id": mitigation.id,
+            "incident_id": incident.id,
+            "flag_key": target_flag.key,
+            "restored_state": {
+                "enabled": restored_enabled,
+                "rollout_percentage": restored_rollout,
+            },
+            "message": f"Feature flag '{target_flag.key}' restored to previous state.",
+            "reverted_at": now.isoformat(),
+            "reverted_by": actor_id,
+        }
+

@@ -16,13 +16,31 @@ import {
   Sliders,
   Tag,
   AlertOctagon,
+  Layers,
+  Link2,
 } from 'lucide-react';
-import { formatRelativeTime } from '../utils/formatters';
+import { formatRelativeTime, formatExactTimestamp } from '../utils/formatters';
+
+function formatDuration(startedAt, resolvedAt) {
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
+  const diffSec = Math.max(0, Math.floor((end - start) / 1000));
+  const hours = Math.floor(diffSec / 3600);
+  const minutes = Math.floor((diffSec % 3600) / 60);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
 
 export default function IncidentsPage() {
   const navigate = useNavigate();
   const { selectedTenant } = useAuth();
   const { selectedProject: currentProject } = useProject();
+
+  const userRole = selectedTenant?.role || 'member';
+  const canManage = userRole === 'owner' || userRole === 'admin';
 
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -38,6 +56,7 @@ export default function IncidentsPage() {
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newSeverity, setNewSeverity] = useState('high');
+  const [newStatus, setNewStatus] = useState('open');
   const [newEnv, setNewEnv] = useState('production');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState(null);
@@ -74,6 +93,7 @@ export default function IncidentsPage() {
         title: newTitle.trim(),
         description: newDesc.trim() || null,
         severity: newSeverity,
+        status: newStatus,
         environment: newEnv,
       });
       setShowCreateModal(false);
@@ -102,14 +122,16 @@ export default function IncidentsPage() {
 
   const getStatusBadge = (st) => {
     switch (st?.toLowerCase()) {
+      case 'open':
       case 'triggered':
-        return 'bg-rose-500/10 text-rose-400 border-rose-500/30 animate-pulse';
+        return 'bg-rose-500/10 text-rose-400 border-rose-500/30 font-semibold animate-pulse';
+      case 'monitoring':
       case 'investigating':
-        return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
+        return 'bg-amber-500/10 text-amber-400 border-amber-500/30 font-semibold';
       case 'mitigated':
-        return 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30';
+        return 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30 font-semibold';
       case 'resolved':
-        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
+        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-semibold';
       case 'closed':
         return 'bg-slate-500/10 text-slate-400 border-slate-500/30';
       default:
@@ -119,13 +141,13 @@ export default function IncidentsPage() {
 
   // Quick metrics
   const activeCount = incidents.filter(
-    (i) => i.status === 'triggered' || i.status === 'investigating'
+    (i) => i.status === 'open' || i.status === 'triggered' || i.status === 'investigating' || i.status === 'monitoring'
   ).length;
   const criticalCount = incidents.filter(
-    (i) => (i.severity === 'critical' || i.severity === 'high') && i.status !== 'closed'
+    (i) => (i.severity === 'critical' || i.severity === 'high') && i.status !== 'resolved' && i.status !== 'closed'
   ).length;
-  const mitigatedCount = incidents.filter(
-    (i) => i.status === 'mitigated' || i.status === 'resolved'
+  const resolvedCount = incidents.filter(
+    (i) => i.status === 'resolved' || i.status === 'closed' || i.status === 'mitigated'
   ).length;
 
   return (
@@ -133,12 +155,17 @@ export default function IncidentsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-mono font-medium px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+              Project: {currentProject?.name || 'Default'}
+            </span>
+          </div>
           <h1 className="text-2xl font-bold text-slate-100 tracking-tight flex items-center gap-2.5">
             <Flame className="w-6 h-6 text-rose-500" />
-            Incident Response & Mitigation
+            Incident Management & Mitigation
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Detect error velocity spikes, correlate recent deployments, and execute controlled mitigations
+            Detect regressions, track linked error issues, and execute reversible feature flag mitigations
           </p>
         </div>
 
@@ -150,13 +177,15 @@ export default function IncidentsPage() {
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-sm font-medium transition shadow-sm cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            Trigger Incident
-          </button>
+          {canManage && (
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="inline-flex items-center gap-2 px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-sm font-medium transition shadow-sm cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Declare Incident
+            </button>
+          )}
         </div>
       </div>
 
@@ -170,17 +199,17 @@ export default function IncidentsPage() {
               <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping inline-block" />
             )}
           </div>
-          <div className="text-[11px] text-slate-500 mt-1">Triggered or currently under investigation</div>
+          <div className="text-[11px] text-slate-500 mt-1">Open or currently under monitoring</div>
         </div>
         <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="text-xs font-medium text-slate-400">Critical / High Severity</div>
           <div className="text-2xl font-bold text-orange-400 mt-1">{criticalCount}</div>
-          <div className="text-[11px] text-slate-500 mt-1">High-impact active failure events</div>
+          <div className="text-[11px] text-slate-500 mt-1">Elevated error rates and regressions</div>
         </div>
         <div className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl">
           <div className="text-xs font-medium text-slate-400">Mitigated / Resolved</div>
-          <div className="text-2xl font-bold text-emerald-400 mt-1">{mitigatedCount}</div>
-          <div className="text-[11px] text-slate-500 mt-1">Safely mitigated with feature kill switch</div>
+          <div className="text-2xl font-bold text-emerald-400 mt-1">{resolvedCount}</div>
+          <div className="text-[11px] text-slate-500 mt-1">Resolved or mitigated with feature kill switch</div>
         </div>
       </div>
 
@@ -193,11 +222,13 @@ export default function IncidentsPage() {
           className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1.5 focus:ring-1 focus:ring-rose-500"
         >
           <option value="">All Statuses</option>
-          <option value="triggered">Triggered</option>
-          <option value="investigating">Investigating</option>
-          <option value="mitigated">Mitigated</option>
+          <option value="open">Open</option>
+          <option value="monitoring">Monitoring</option>
           <option value="resolved">Resolved</option>
-          <option value="closed">Closed</option>
+          <option value="triggered">Triggered (Legacy)</option>
+          <option value="investigating">Investigating (Legacy)</option>
+          <option value="mitigated">Mitigated (Legacy)</option>
+          <option value="closed">Closed (Legacy)</option>
         </select>
 
         <select
@@ -230,7 +261,7 @@ export default function IncidentsPage() {
               setSeverityFilter('');
               setEnvFilter('');
             }}
-            className="text-xs text-rose-400 hover:text-rose-300 ml-auto"
+            className="text-xs text-rose-400 hover:text-rose-300 ml-auto cursor-pointer"
           >
             Clear filters
           </button>
@@ -252,83 +283,93 @@ export default function IncidentsPage() {
         ) : incidents.length === 0 ? (
           <div className="p-12 text-center text-slate-500">
             <ShieldAlert className="w-10 h-10 mx-auto mb-3 opacity-30 text-rose-400" />
-            <h3 className="text-sm font-semibold text-slate-300">No active incidents found</h3>
+            <h3 className="text-sm font-semibold text-slate-300">No incidents found</h3>
             <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-              System is operating within error baseline thresholds. Create a manual incident or simulate an error spike.
+              System is operating within error baseline thresholds. Declare an incident to track active investigation.
             </p>
           </div>
         ) : (
           <div className="divide-y divide-slate-800/80">
-            {incidents.map((inc) => (
-              <div
-                key={inc.id}
-                onClick={() => navigate(`/incidents/${inc.id}`)}
-                className="p-4 hover:bg-slate-800/40 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
-              >
-                <div className="space-y-1.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider border font-mono ${getSeverityBadge(
-                        inc.severity
-                      )}`}
-                    >
-                      {inc.severity}
-                    </span>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium border font-mono ${getStatusBadge(
-                        inc.status
-                      )}`}
-                    >
-                      {inc.status}
-                    </span>
-                    <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                      {inc.environment}
-                    </span>
-                    <span className="text-xs text-slate-500 flex items-center gap-1">
-                      <Clock className="w-3 h-3" />
-                      {formatRelativeTime(inc.started_at)}
-                    </span>
+            {incidents.map((inc) => {
+              const linkedCount = inc.linked_issue_count || inc.linked_issues?.length || (inc.related_issue_id ? 1 : 0);
+              const duration = formatDuration(inc.started_at, inc.resolved_at);
+
+              return (
+                <div
+                  key={inc.id}
+                  onClick={() => navigate(`/incidents/${inc.id}`)}
+                  className="p-4 hover:bg-slate-800/40 transition cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 group"
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider border font-mono ${getSeverityBadge(
+                          inc.severity
+                        )}`}
+                      >
+                        {inc.severity}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[11px] font-medium border font-mono ${getStatusBadge(
+                          inc.status
+                        )}`}
+                      >
+                        {inc.status}
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                        {inc.environment}
+                      </span>
+                      <span className="text-xs text-slate-500 flex items-center gap-1 font-mono">
+                        <Clock className="w-3 h-3" />
+                        {formatRelativeTime(inc.started_at || inc.created_at)}
+                      </span>
+                      {duration && (
+                        <span className="text-[11px] text-slate-400 font-mono px-2 py-0.5 bg-slate-800/60 rounded border border-slate-700/60">
+                          {inc.resolved_at ? `Resolved in ${duration}` : `Active for ${duration}`}
+                        </span>
+                      )}
+                    </div>
+
+                    <h3 className="text-base font-semibold text-slate-200 group-hover:text-rose-400 transition">
+                      #{inc.id} {inc.title}
+                    </h3>
+
+                    {inc.description && (
+                      <p className="text-xs text-slate-400 line-clamp-1">{inc.description}</p>
+                    )}
+
+                    {/* Connected Resources Badges */}
+                    <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
+                      {linkedCount > 0 && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/30 font-mono text-[11px]">
+                          <Link2 className="w-3 h-3 text-rose-400" />
+                          {linkedCount} linked issue{linkedCount > 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {inc.related_release_version && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[11px]">
+                          <Tag className="w-3 h-3 text-indigo-400" />
+                          Release v{inc.related_release_version}
+                        </span>
+                      )}
+                      {inc.related_feature_flag_key && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[11px]">
+                          <Sliders className="w-3 h-3 text-amber-400" />
+                          Flag: {inc.related_feature_flag_key}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
-                  <h3 className="text-base font-semibold text-slate-200 group-hover:text-rose-400 transition">
-                    #{inc.id} {inc.title}
-                  </h3>
-
-                  {inc.description && (
-                    <p className="text-xs text-slate-400 line-clamp-1">{inc.description}</p>
-                  )}
-
-                  {/* Connected Resources Badges */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
-                    {inc.related_issue_id && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[11px]">
-                        <AlertOctagon className="w-3 h-3 text-rose-400" />
-                        Issue #{inc.related_issue_id}
-                      </span>
-                    )}
-                    {inc.related_release_version && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[11px]">
-                        <Tag className="w-3 h-3 text-indigo-400" />
-                        Release v{inc.related_release_version}
-                      </span>
-                    )}
-                    {inc.related_feature_flag_key && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono text-[11px]">
-                        <Sliders className="w-3 h-3 text-amber-400" />
-                        Flag: {inc.related_feature_flag_key}
-                      </span>
-                    )}
+                  <div className="flex items-center gap-2 self-end sm:self-center">
+                    <span className="text-xs text-slate-400 group-hover:text-slate-200 transition flex items-center gap-1">
+                      Investigate
+                      <ChevronRight className="w-4 h-4" />
+                    </span>
                   </div>
                 </div>
-
-                <div className="flex items-center gap-2 self-end sm:self-center">
-                  <span className="text-xs text-slate-400 group-hover:text-slate-200 transition flex items-center gap-1">
-                    Investigate
-                    <ChevronRight className="w-4 h-4" />
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -342,7 +383,7 @@ export default function IncidentsPage() {
               Declare New Incident
             </h2>
             <p className="text-xs text-slate-400">
-              Declare an incident to track error velocity surges, review correlated deployments, and recommend controlled mitigations.
+              Declare an incident to track errors, review correlated deployments, and apply feature flag mitigations.
             </p>
 
             {formError && (
@@ -366,7 +407,7 @@ export default function IncidentsPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">
                     Severity Level
@@ -376,16 +417,31 @@ export default function IncidentsPage() {
                     onChange={(e) => setNewSeverity(e.target.value)}
                     className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:ring-1 focus:ring-rose-500"
                   >
-                    <option value="critical">Critical (Outage)</option>
-                    <option value="high">High (Elevated Errors)</option>
-                    <option value="medium">Medium (Degraded)</option>
-                    <option value="low">Low (Minor Impact)</option>
+                    <option value="critical">Critical</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Target Environment
+                    Initial Status
+                  </label>
+                  <select
+                    value={newStatus}
+                    onChange={(e) => setNewStatus(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:ring-1 focus:ring-rose-500"
+                  >
+                    <option value="open">Open</option>
+                    <option value="monitoring">Monitoring</option>
+                    <option value="resolved">Resolved</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Environment
                   </label>
                   <select
                     value={newEnv}
@@ -425,7 +481,7 @@ export default function IncidentsPage() {
                   disabled={submitting || !newTitle.trim()}
                   className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-sm font-medium transition shadow-sm disabled:opacity-50 cursor-pointer"
                 >
-                  {submitting ? 'Triggering...' : 'Trigger Incident'}
+                  {submitting ? 'Declaring...' : 'Declare Incident'}
                 </button>
               </div>
             </form>
