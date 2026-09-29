@@ -46,7 +46,7 @@ def get_copilot_provider(provider_name: Optional[str] = None) -> BaseCopilotProv
         if settings.GEMINI_API_KEY:
             return GeminiCopilotProvider(
                 api_key=settings.GEMINI_API_KEY,
-                model_name=settings.COPILOT_MODEL or "gemini-2.5-flash",
+                model_name=settings.COPILOT_MODEL or "gemini-3.8-flash",
                 timeout_seconds=settings.COPILOT_TIMEOUT_SECONDS,
             )
         # Fallback to mock in dev/test if key not configured

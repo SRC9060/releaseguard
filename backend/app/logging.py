@@ -9,11 +9,13 @@ request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id
 tenant_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_id", default="")
 project_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("project_id", default="")
 
-# Regex pattern for sensitive patterns (passwords, api keys, bearer tokens, connection URLs)
+# Regex pattern for sensitive patterns (passwords, api keys, bearer tokens, connection URLs, query credentials)
 SENSITIVE_PATTERNS = [
     re.compile(r'("?(?:password|password_hash|secret|token|api_key|authorization|bearer)"?\s*[:=]\s*["\'])([^"\']+)("?)', re.IGNORECASE),
     re.compile(r"(Bearer\s+)[A-Za-z0-9\-_\.]+", re.IGNORECASE),
     re.compile(r"(rg_live_)[a-f0-9]+", re.IGNORECASE),
+    re.compile(r"AIzaSy[A-Za-z0-9\-_]{33}", re.IGNORECASE),
+    re.compile(r"([?&](?:key|api_key|token|secret|apiKey)=)[^&\s'\"]+", re.IGNORECASE),
     re.compile(r'((?:redis|rediss|postgresql|postgres)://)(?:[^:@]+:[^@]+|:[^@]+)(@)', re.IGNORECASE),
 ]
 
@@ -28,6 +30,10 @@ def redact_sensitive(text: str) -> str:
             redacted = pattern.sub(r"\1[REDACTED]", redacted)
         elif "://" in pattern.pattern:
             redacted = pattern.sub(r"\1[REDACTED]\2", redacted)
+        elif "AIzaSy" in pattern.pattern:
+            redacted = pattern.sub("[REDACTED_KEY]", redacted)
+        elif "[?&]" in pattern.pattern:
+            redacted = pattern.sub(r"\1[REDACTED]", redacted)
         else:
             redacted = pattern.sub(r"\1[REDACTED]\3", redacted)
     return redacted
@@ -87,3 +93,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     for name in ["releaseguard", "releaseguard.worker", "releaseguard.queue", "uvicorn.access"]:
         logger = logging.getLogger(name)
         logger.setLevel(level)
+
+    # Suppress verbose httpx outbound request logs from printing URLs in production
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

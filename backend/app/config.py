@@ -48,7 +48,7 @@ class Settings:
 
         # AI Incident Copilot
         self.COPILOT_PROVIDER: str = os.getenv("COPILOT_PROVIDER", "gemini").lower()
-        self.COPILOT_MODEL: str = os.getenv("COPILOT_MODEL", "gemini-2.5-flash")
+        self.COPILOT_MODEL: str = os.getenv("COPILOT_MODEL", "gemini-3.8-flash")
         self.GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
         self.OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
         self.OPENAI_BASE_URL: str | None = os.getenv("OPENAI_BASE_URL")

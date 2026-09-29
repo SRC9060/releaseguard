@@ -13,7 +13,7 @@ const MOCK_COPILOT_RESPONSE = {
   id: 101,
   incident_id: 42,
   provider: 'gemini',
-  model: 'gemini-2.5-flash',
+  model: 'gemini-3.8-flash',
   cached: false,
   context_hash: 'a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890',
   created_at: '2026-09-29T10:00:00Z',

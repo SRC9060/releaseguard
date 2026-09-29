@@ -31,9 +31,11 @@ from app.copilot.providers import (
     CopilotProviderError,
     CopilotResponseParseError,
     CopilotTimeoutError,
+    GeminiCopilotProvider,
     MockCopilotProvider,
     get_copilot_provider,
 )
+from app.logging import redact_sensitive
 from app.copilot.schemas import CopilotAnalysisPayload, Hypothesis
 from app.copilot.service import CopilotService
 from app.models import (
@@ -142,6 +144,123 @@ def test_get_copilot_provider_fallback_to_mock(monkeypatch):
     provider = get_copilot_provider()
     # When api key is missing in tests, safe fallback to mock
     assert isinstance(provider, MockCopilotProvider)
+
+
+def test_gemini_provider_default_model_is_gemini_3_8_flash(monkeypatch):
+    monkeypatch.setattr("app.config.settings.COPILOT_PROVIDER", "gemini")
+    monkeypatch.setattr("app.config.settings.COPILOT_MODEL", "gemini-3.8-flash")
+    monkeypatch.setattr("app.config.settings.GEMINI_API_KEY", "test_gemini_key_12345")
+    provider = get_copilot_provider()
+    assert isinstance(provider, GeminiCopilotProvider)
+    assert provider.model_name == "gemini-3.8-flash"
+    assert provider.provider_name == "gemini"
+
+
+def test_gemini_provider_environment_model_override(monkeypatch):
+    monkeypatch.setattr("app.config.settings.COPILOT_PROVIDER", "gemini")
+    monkeypatch.setattr("app.config.settings.COPILOT_MODEL", "custom-copilot-model-v9")
+    monkeypatch.setattr("app.config.settings.GEMINI_API_KEY", "test_gemini_key_12345")
+    provider = get_copilot_provider()
+    assert isinstance(provider, GeminiCopilotProvider)
+    assert provider.model_name == "custom-copilot-model-v9"
+
+
+def test_gemini_provider_header_auth_no_key_in_url(monkeypatch):
+    """
+    Guarantees that GeminiCopilotProvider authenticates using the x-goog-api-key header
+    and never attaches ?key=... in query parameters, preventing credential leaks in HTTP logs.
+    """
+    provider = GeminiCopilotProvider(
+        api_key="AIzaSySecretApiKeyDoNotLeak987654321",
+        model_name="gemini-3.8-flash",
+    )
+    captured_request = {}
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, json=None, headers=None, **kwargs):
+            import json as _json
+            captured_request["url"] = url
+            captured_request["headers"] = headers
+            captured_request["kwargs"] = kwargs
+
+            mock_response_payload = {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": _json.dumps({
+                                        "summary": "Mock Gemini 3.8 flash analysis",
+                                        "recent_changes": [],
+                                        "hypotheses": [
+                                            {
+                                                "id": "H1",
+                                                "title": "Config drift",
+                                                "explanation": "Settings mismatch",
+                                                "evidence": ["observed error 500"],
+                                                "inference": ["likely timeout"],
+                                                "likelihood": "plausible",
+                                            }
+                                        ],
+                                        "recommended_actions": [
+                                            {
+                                                "action_type": "investigation",
+                                                "priority": "immediate",
+                                                "description": "Check logs",
+                                                "rationale": "Verify behavior",
+                                                "risk_assessment": "none",
+                                            }
+                                        ],
+                                        "evidence": [],
+                                        "uncertainties": [],
+                                    })
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+            class MockResponse:
+                status_code = 200
+
+                def json(self):
+                    return mock_response_payload
+
+            return MockResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", MockAsyncClient)
+    result = asyncio.run(provider.analyze("system prompt", "user prompt"))
+    assert result.summary == "Mock Gemini 3.8 flash analysis"
+
+    # Verify URL is clean and DOES NOT leak credentials
+    assert "AIzaSy" not in captured_request["url"]
+    assert "?key=" not in captured_request["url"]
+    assert "&key=" not in captured_request["url"]
+    assert captured_request["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+
+    # Verify authentication is sent via x-goog-api-key header
+    assert captured_request["headers"]["x-goog-api-key"] == "AIzaSySecretApiKeyDoNotLeak987654321"
+
+
+def test_redact_sensitive_url_query_credentials_and_google_keys():
+    test_line = (
+        "HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6 "
+        "and header Bearer eyJhbGciOiJIUzI1NiJ9.test and api_key='secret123'"
+    )
+    sanitized = redact_sensitive(test_line)
+    assert "AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6" not in sanitized
+    assert "secret123" not in sanitized
+    assert "key=[REDACTED]" in sanitized
 
 
 # =========================================================================

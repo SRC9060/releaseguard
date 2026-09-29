@@ -41,6 +41,8 @@ SECRET_PATTERNS = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
     # Common password patterns
     (re.compile(r'(?i)(password|secret|token|passwd|pwd)\s*[:=]\s*["\']?[^"\'\s,;]{4,}["\']?'), r"\1=[REDACTED]"),
+    # URL query string credentials (e.g. ?key=... or &api_key=...)
+    (re.compile(r"([?&](?:key|api_key|token|secret|apiKey)=)[^&\s'\"]+", re.IGNORECASE), r"\1[REDACTED]"),
 ]
 
 

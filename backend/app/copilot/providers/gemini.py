@@ -30,7 +30,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
     def __init__(
         self,
         api_key: str,
-        model_name: str = "gemini-2.5-flash",
+        model_name: str = "gemini-3.8-flash",
         timeout_seconds: float = 30.0,
         base_url: str = "https://generativelanguage.googleapis.com/v1beta",
     ) -> None:
@@ -64,19 +64,29 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             }
         }
 
+        # Use x-goog-api-key header for authentication to prevent API key exposure in request URLs and logs
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(
                     endpoint,
-                    params={"key": self.api_key},
                     json=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
 
                 if response.status_code != 200:
                     # Sanitize error detail to prevent key leakage
-                    err_msg = f"Gemini API returned HTTP {response.status_code}: {response.text[:200]}"
-                    logger.error(err_msg.replace(self.api_key, "[REDACTED]"))
+                    clean_text = response.text[:200].replace(self.api_key, "[REDACTED]")
+                    logger.error(
+                        "Gemini API returned HTTP %d for model %s: %s",
+                        response.status_code,
+                        self.model_name,
+                        clean_text,
+                    )
                     raise CopilotProviderError(f"Gemini API returned HTTP {response.status_code}")
 
                 data = response.json()
