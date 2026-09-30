@@ -156,6 +156,39 @@ class MockCopilotProvider(BaseCopilotProvider):
         if self.custom_chat_payload is not None:
             return self.custom_chat_payload
 
+        # Check if user prompt is inquiring about a hypothesis such as H1
+        question_lower = user_prompt.lower()
+        has_persisted_analysis = "<persisted_copilot_analysis>" in user_prompt
+
+        if "h1" in question_lower:
+            if has_persisted_analysis and '"id": "h1"' in question_lower:
+                return CopilotChatPayload(
+                    answer="Hypothesis H1 is probable because the newly enabled feature flag correlates temporally with error spikes in payment processing.",
+                    evidence=[
+                        CopilotChatEvidenceItem(
+                            source_type="feature_flag",
+                            source_id="enable_stripe_v3",
+                            claim="Feature flag enable_stripe_v3 was enabled 10 minutes prior to error onset",
+                        ),
+                        CopilotChatEvidenceItem(
+                            source_type="issue",
+                            source_id=1,
+                            claim="Issue #1 occurred 45 times across the incident window",
+                        ),
+                    ],
+                    uncertainties=[
+                        "Database connection pool metrics are not visible in telemetry",
+                    ],
+                )
+            elif not has_persisted_analysis or '"id": "h1"' not in question_lower:
+                return CopilotChatPayload(
+                    answer="The available telemetry and incident context do not contain any reference to 'H1'. No persisted analysis with hypothesis H1 was found for this incident.",
+                    evidence=[],
+                    uncertainties=[
+                        "No structured hypothesis H1 exists in the incident telemetry or persisted analysis",
+                    ],
+                )
+
         return CopilotChatPayload(
             answer="The primary evidence points to release v2.4.0 and related error spikes in webhook processing.",
             evidence=[

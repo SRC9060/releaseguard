@@ -253,6 +253,32 @@ class IncidentContextBuilder:
             "</untrusted_incident_data>"
         )
 
+    @classmethod
+    def format_persisted_analysis_envelope(cls, analysis: Any) -> str:
+        """
+        Formats the latest structured analysis into an untrusted data envelope
+        suitable for LLM conversational context, with secrets thoroughly scrubbed.
+        """
+        if hasattr(analysis, "model_dump"):
+            data = analysis.model_dump()
+        elif isinstance(analysis, str):
+            try:
+                data = json.loads(analysis)
+            except Exception:
+                data = {"raw": analysis}
+        elif isinstance(analysis, dict):
+            data = analysis
+        else:
+            data = str(analysis)
+
+        scrubbed = scrub_secrets(data)
+        data_json = json.dumps(scrubbed, indent=2, default=str)
+        return (
+            "<persisted_copilot_analysis>\n"
+            f"{data_json}\n"
+            "</persisted_copilot_analysis>"
+        )
+
     _context_cache: Dict[int, tuple[Any, Dict[str, Any], str]] = {}
 
     @classmethod
@@ -294,5 +320,6 @@ class IncidentContextBuilder:
 
 compute_context_hash = IncidentContextBuilder.compute_context_hash
 format_untrusted_data_envelope = IncidentContextBuilder.format_untrusted_data_envelope
+format_persisted_analysis_envelope = IncidentContextBuilder.format_persisted_analysis_envelope
 get_or_build_context = IncidentContextBuilder.get_or_build_context
 clear_context_cache = IncidentContextBuilder.clear_context_cache

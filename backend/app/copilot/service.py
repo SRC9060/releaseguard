@@ -131,16 +131,28 @@ class CopilotService:
         cls,
         incident_id: int,
         db: Session,
+        tenant_id: Optional[int] = None,
+        project_id: Optional[int] = None,
     ) -> Optional[CopilotAnalysisResponse]:
         """
         Retrieves the most recent persisted analysis for an incident, if one exists.
+        Guarantees tenant and project isolation when tenant_id or project_id are provided.
         """
-        record = (
+        query = (
             db.query(IncidentCopilotAnalysis)
+            .join(Incident, IncidentCopilotAnalysis.incident_id == Incident.id)
             .filter(IncidentCopilotAnalysis.incident_id == incident_id)
-            .order_by(desc(IncidentCopilotAnalysis.created_at))
-            .first()
         )
+        if tenant_id is not None:
+            query = query.filter(Incident.tenant_id == tenant_id)
+        if project_id is not None:
+            query = query.filter(Incident.project_id == project_id)
+
+        record = query.order_by(
+            desc(IncidentCopilotAnalysis.created_at),
+            desc(IncidentCopilotAnalysis.id),
+        ).first()
+
         if record is None:
             return None
 
@@ -173,7 +185,7 @@ class CopilotService:
         Coordinates conversational incident investigation inquiries.
         - Scrub secrets from user message.
         - Fetch or compute incident context & context_hash.
-        - Retrieve latest persisted analysis summary if available.
+        - Retrieve latest persisted analysis if available (scoped by tenant and project).
         - Load bounded recent chat history (COPILOT_CHAT_HISTORY_LIMIT).
         - Persist user message to IncidentCopilotMessage.
         - Envelop all data in untrusted boundaries and format chat user prompt.
@@ -187,8 +199,18 @@ class CopilotService:
         # 2. Get or build authorized, sanitized incident context & hash
         context, context_hash = IncidentContextBuilder.get_or_build_context(incident, db)
 
-        # 3. Retrieve latest analysis summary if available
-        latest_analysis = cls.get_latest_analysis(incident.id, db)
+        # 3. Retrieve latest analysis if available (strictly tenant and project scoped)
+        latest_analysis = cls.get_latest_analysis(
+            incident_id=incident.id,
+            db=db,
+            tenant_id=incident.tenant_id,
+            project_id=incident.project_id,
+        )
+        persisted_analysis_envelope = None
+        if latest_analysis and latest_analysis.analysis:
+            persisted_analysis_envelope = IncidentContextBuilder.format_persisted_analysis_envelope(
+                latest_analysis.analysis
+            )
         latest_summary = latest_analysis.analysis.summary if latest_analysis else None
 
         # 4. Load bounded chat history (configured limit, e.g. 12)
@@ -236,6 +258,7 @@ class CopilotService:
             envelope=envelope,
             chat_history=chat_history_dicts,
             current_question=clean_user_message,
+            persisted_analysis_envelope=persisted_analysis_envelope,
             latest_analysis_summary=latest_summary,
         )
 
