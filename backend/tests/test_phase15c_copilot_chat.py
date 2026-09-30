@@ -23,6 +23,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 import json
 from unittest.mock import AsyncMock, patch
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -1006,3 +1007,375 @@ def test_copilot_chat_persisted_analysis_secret_scrubbing(client: TestClient, db
     assert "SuperSecretPassword123" not in prompt
     assert "[REDACTED_DB_URI]" in prompt or "[REDACTED" in prompt
     assert "sk-ant-api03-abcdef123456789012345678901234567890" not in prompt
+
+
+# =========================================================================
+# 16. Explicit Phase 15C Chat Provider Failover Tests (10 Test Cases)
+# =========================================================================
+
+def make_valid_gemini_chat_payload(answer: str = "Test answer"):
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": json.dumps({
+                                "answer": answer,
+                                "evidence": [
+                                    {
+                                        "source_type": "incident",
+                                        "source_id": "1",
+                                        "claim": "Incident telemetry verified",
+                                    }
+                                ],
+                                "uncertainties": ["None noted"],
+                            })
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+
+def test_gemini_chat_failover_1_primary_503_retry_success(monkeypatch, caplog):
+    """1. chat: primary 503 → retry → success"""
+    caplog.set_level("INFO")
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Service Unavailable"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Primary retry succeeded")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    result = asyncio.run(provider.chat("system prompt", "user prompt"))
+    assert result.answer == "Primary retry succeeded"
+    assert len(captured_calls) == 2
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert "gemini-3.8-flash" in captured_calls[1]["url"]
+    assert provider.model_name == "gemini-3.8-flash"
+    assert "Gemini transient failure: status=503 model=gemini-3.8-flash attempt=1/2" in caplog.text
+    assert "Retrying after backoff..." in caplog.text
+
+
+def test_gemini_chat_failover_2_primary_503_retry_fallback_success(monkeypatch, caplog):
+    """2. chat: primary 503 → retry → fallback success"""
+    caplog.set_level("INFO")
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Primary 503 attempt 1"),
+        MockHttpxResponse(503, text="Primary 503 attempt 2"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Fallback succeeded")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    result = asyncio.run(provider.chat("system prompt", "user prompt"))
+    assert result.answer == "Fallback succeeded"
+    assert len(captured_calls) == 3
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert "gemini-3.8-flash" in captured_calls[1]["url"]
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
+    assert provider.model_name == "gemini-3.5-flash-lite"
+    assert "Gemini transient failure: status=503 model=gemini-3.8-flash attempt=1/2" in caplog.text
+    assert "Retrying after backoff..." in caplog.text
+    assert "Gemini transient failure: status=503 model=gemini-3.8-flash attempt=2/2" in caplog.text
+    assert "Primary model exhausted retries; trying fallback model=gemini-3.5-flash-lite" in caplog.text
+
+
+def test_gemini_chat_failover_3_primary_503_fallback_503_safe_503(monkeypatch):
+    """3. chat: primary 503 → fallback 503 → safe 503"""
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Primary 503 attempt 1"),
+        MockHttpxResponse(503, text="Primary 503 attempt 2"),
+        MockHttpxResponse(503, text="Fallback 503 attempt 1"),
+        MockHttpxResponse(503, text="Unreached"),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    with pytest.raises(CopilotProviderError) as exc_info:
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert "503" in str(exc_info.value)
+    assert len(captured_calls) == 3
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert "gemini-3.8-flash" in captured_calls[1]["url"]
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
+
+
+def test_gemini_chat_failover_4_fallback_timeout_safe_timeout(monkeypatch):
+    """4. chat: fallback timeout → safe timeout"""
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Primary 503 attempt 1"),
+        MockHttpxResponse(503, text="Primary 503 attempt 2"),
+        httpx.ReadTimeout("Fallback timeout"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Unreached")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    with pytest.raises(CopilotTimeoutError):
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert len(captured_calls) == 3
+    assert "gemini-3.5-flash-lite" in captured_calls[2]["url"]
+
+
+def test_gemini_chat_failover_5_400_no_retry_fallback(monkeypatch):
+    """5. chat: 400 → no retry/fallback"""
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(400, text="Bad Request"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Unreached")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+    )
+
+    with pytest.raises(CopilotProviderError) as exc_info:
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert "400" in str(exc_info.value)
+    assert len(captured_calls) == 1
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+    assert provider.model_name == "gemini-3.8-flash"
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+def test_gemini_chat_failover_6_client_errors_no_retry_fallback(monkeypatch, status_code):
+    """6. chat: 401/403/404 → no retry/fallback"""
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(status_code, text=f"Client Error {status_code}"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Unreached")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+    )
+
+    with pytest.raises(CopilotProviderError) as exc_info:
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert str(status_code) in str(exc_info.value)
+    assert len(captured_calls) == 1
+    assert "gemini-3.8-flash" in captured_calls[0]["url"]
+
+
+def test_gemini_chat_failover_7_malformed_response_no_retry_fallback(monkeypatch):
+    """7. chat: malformed structured response → no retry/fallback"""
+    captured_calls = []
+    malformed_payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": json.dumps({"unknown_field": "corrupt"})}]
+                }
+            }
+        ]
+    }
+    responses = [
+        MockHttpxResponse(200, payload=malformed_payload),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Unreached")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+    )
+
+    with pytest.raises(CopilotResponseParseError):
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert len(captured_calls) == 1
+
+
+def test_gemini_chat_failover_8_overall_deadline_respected(monkeypatch):
+    """8. chat: overall deadline is respected"""
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="Service Unavailable"),
+        MockHttpxResponse(503, text="Service Unavailable"),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    current_time = 50.0
+
+    def mock_monotonic():
+        nonlocal current_time
+        val = current_time
+        current_time += 15.0  # Advances time past 20.0s deadline quickly
+        return val
+
+    monkeypatch.setattr("time.monotonic", mock_monotonic)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-123",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        timeout_seconds=20.0,
+        max_retries=1,
+        fallback_max_retries=0,
+    )
+
+    with pytest.raises(CopilotTimeoutError):
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+
+def test_gemini_chat_failover_9_successful_fallback_records_model(client: TestClient, db_session, monkeypatch):
+    """9. chat: successful fallback records model=gemini-3.5-flash-lite in API response and database"""
+    owner_token, member_token, tenant, proj, incident, issue = setup_chat_test_env(client, db_session)
+    url = f"/api/v1/tenants/{tenant['id']}/projects/{proj['id']}/incidents/{incident['id']}/copilot/chat"
+
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="503 Primary Busy 1"),
+        MockHttpxResponse(503, text="503 Primary Busy 2"),
+        MockHttpxResponse(200, payload=make_valid_gemini_chat_payload("Fallback answer via API")),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key="test-key-chat-persist",
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    with patch("app.copilot.service.get_copilot_provider", return_value=provider):
+        resp = client.post(url, json={"message": "What is happening?"}, headers=auth_headers(member_token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == "gemini-3.5-flash-lite"
+        assert data["answer"] == "Fallback answer via API"
+
+    # Verify persisted message in database records actual fallback model
+    db_msg = (
+        db_session.query(IncidentCopilotMessage)
+        .filter(IncidentCopilotMessage.incident_id == incident["id"], IncidentCopilotMessage.role == "assistant")
+        .order_by(IncidentCopilotMessage.created_at.desc())
+        .first()
+    )
+    assert db_msg is not None
+    assert db_msg.model == "gemini-3.5-flash-lite"
+    assert db_msg.provider == "gemini"
+
+
+def test_gemini_chat_failover_10_no_api_key_leakage(monkeypatch, caplog):
+    """10. chat: no API key leakage in logs on failures"""
+    caplog.set_level("INFO")
+    secret_key = "AIzaSySuperSecretChatKey_991122"
+    captured_calls = []
+    responses = [
+        MockHttpxResponse(503, text="503 error"),
+        MockHttpxResponse(503, text="503 error"),
+        MockHttpxResponse(503, text="503 error"),
+    ]
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda *args, **kwargs: SequenceMockAsyncClient(responses, captured_calls),
+    )
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    provider = GeminiCopilotProvider(
+        api_key=secret_key,
+        model_name="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+        max_retries=1,
+        fallback_max_retries=0,
+        retry_base_delay_seconds=0.001,
+    )
+
+    with pytest.raises(CopilotProviderError):
+        asyncio.run(provider.chat("system prompt", "user prompt"))
+
+    assert secret_key not in caplog.text

@@ -166,10 +166,11 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             retry_attempt = attempt_idx + 1
             now = time.monotonic()
             remaining = deadline - now
-            if remaining <= 0:
-                raise CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
+            if remaining <= 0.01:
+                last_exc = CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
+                break
 
-            request_timeout = min(self.timeout_seconds, remaining)
+            request_timeout = max(0.01, min(self.timeout_seconds, remaining))
 
             try:
                 async with httpx.AsyncClient(timeout=request_timeout) as client:
@@ -203,61 +204,65 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                     )
                     raise CopilotProviderError(f"Gemini API returned HTTP {response.status_code}")
 
-                # Transient error: retry if attempts remain
+                # Transient error: log failure for this attempt
+                logger.warning(
+                    "Gemini transient failure: status=%d model=%s attempt=%d/%d",
+                    response.status_code,
+                    model_name,
+                    retry_attempt,
+                    max_attempts,
+                )
+                last_exc = CopilotProviderError(f"Gemini API returned HTTP {response.status_code}")
+
+                # Retry if attempts remain
                 if attempt_idx < effective_retries:
-                    logger.warning(
-                        "Gemini transient failure: status=%d model=%s attempt=%d/%d",
-                        response.status_code,
-                        model_name,
-                        retry_attempt,
-                        effective_retries,
-                    )
-                    logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
                     remaining_after = deadline - time.monotonic()
                     if remaining_after <= delay:
-                        raise CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
+                        # Cannot sleep within deadline
+                        break
+                    logger.info("Retrying after backoff...")
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    last_exc = CopilotProviderError(f"Gemini API returned HTTP {response.status_code}")
                     break
 
-            except (CopilotProviderError, CopilotResponseParseError, CopilotTimeoutError):
+            except (CopilotProviderError, CopilotResponseParseError):
+                # Non-transient client errors and JSON schema parse errors fail immediately
                 raise
             except httpx.TimeoutException as exc:
+                logger.warning(
+                    "Gemini transient failure: status=timeout model=%s attempt=%d/%d",
+                    model_name,
+                    retry_attempt,
+                    max_attempts,
+                )
                 last_exc = CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
                 if attempt_idx < effective_retries:
-                    logger.warning(
-                        "Gemini transient failure: status=timeout model=%s attempt=%d/%d",
-                        model_name,
-                        retry_attempt,
-                        effective_retries,
-                    )
-                    logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
                     remaining_after = deadline - time.monotonic()
                     if remaining_after <= delay:
-                        raise CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds") from exc
+                        break
+                    logger.info("Retrying after backoff...")
                     await asyncio.sleep(delay)
                     continue
                 else:
                     break
             except httpx.RequestError as exc:
+                logger.warning(
+                    "Gemini transient failure: error=%s model=%s attempt=%d/%d",
+                    type(exc).__name__,
+                    model_name,
+                    retry_attempt,
+                    max_attempts,
+                )
                 last_exc = CopilotProviderError(f"Network error communicating with Gemini API: {type(exc).__name__}")
                 if attempt_idx < effective_retries:
-                    logger.warning(
-                        "Gemini transient failure: error=%s model=%s attempt=%d/%d",
-                        type(exc).__name__,
-                        model_name,
-                        retry_attempt,
-                        effective_retries,
-                    )
-                    logger.info("Retrying after backoff...")
                     delay = self._calculate_backoff_delay(retry_attempt)
                     remaining_after = deadline - time.monotonic()
                     if remaining_after <= delay:
-                        raise CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds") from exc
+                        break
+                    logger.info("Retrying after backoff...")
                     await asyncio.sleep(delay)
                     continue
                 else:
@@ -265,20 +270,47 @@ class GeminiCopilotProvider(BaseCopilotProvider):
 
         return None, last_status, last_exc
 
-    async def analyze(self, system_prompt: str, user_prompt: str) -> CopilotAnalysisPayload:
+    async def _execute_with_failover(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: dict,
+        response_validator: Callable[[str], Any],
+    ) -> Any:
+        """
+        Shared execution engine for analysis and chat with failover policy:
+        1. Attempt primary model (up to 2 total attempts: initial + 1 retry).
+        2. If transient failure (503, 429, timeout, network), failover to secondary model (exactly 1 attempt).
+        3. Never retry/fallback for 400, 401, 403, 404, or schema parse errors.
+        4. Reserves time for fallback to prevent primary retry from consuming overall deadline.
+        5. Reports the actual successful model.
+        """
         if not self.api_key:
             raise CopilotProviderError("GEMINI_API_KEY is not configured on the server")
 
         self.model_name = self.primary_model_name
-        deadline = time.monotonic() + self.timeout_seconds
+        start_time = time.monotonic()
+        deadline = start_time + self.timeout_seconds
+
+        # Reserve time for fallback attempt if a fallback model is configured
+        fallback_reserve = 0.0
+        if self.fallback_model and self.fallback_model != self.primary_model_name:
+            fallback_reserve = min(10.0, self.timeout_seconds * 0.35)
+            if self.timeout_seconds > 2.0:
+                fallback_reserve = max(2.0, fallback_reserve)
+                fallback_reserve = min(fallback_reserve, self.timeout_seconds - 1.0)
+
+        primary_deadline = deadline - fallback_reserve
 
         # 1. Attempt primary model (with self.max_retries, default 1)
         payload, last_status, last_exc = await self._execute_model(
             model_name=self.primary_model_name,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            deadline=deadline,
+            deadline=primary_deadline,
             model_retries=self.max_retries,
+            response_schema=response_schema,
+            response_validator=response_validator,
         )
 
         if payload is not None:
@@ -288,14 +320,28 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         # 2. Check if eligible for fallback model
         is_transient_failure = (
             last_status in self.FALLBACK_STATUS_CODES
-            or isinstance(last_exc, CopilotTimeoutError)
+            or isinstance(last_exc, (CopilotTimeoutError, httpx.RequestError))
+            or (
+                isinstance(last_exc, CopilotProviderError)
+                and (
+                    last_status in self.TRANSIENT_STATUS_CODES
+                    or "Network error" in str(last_exc)
+                )
+            )
         )
+
+        remaining_time = deadline - time.monotonic()
+
         if (
             self.fallback_model
             and self.fallback_model != self.primary_model_name
             and is_transient_failure
-            and (deadline - time.monotonic()) > 0
         ):
+            # Fail fast if there is not enough remaining time for a fallback request
+            min_fallback_time = min(0.5, self.timeout_seconds * 0.1) if self.timeout_seconds > 0.5 else 0.05
+            if remaining_time < min_fallback_time:
+                raise CopilotTimeoutError(f"Gemini API timed out after {self.timeout_seconds} seconds")
+
             logger.warning(
                 "Primary model exhausted retries; trying fallback model=%s",
                 self.fallback_model,
@@ -306,6 +352,8 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                 user_prompt=user_prompt,
                 deadline=deadline,
                 model_retries=self.fallback_max_retries,
+                response_schema=response_schema,
+                response_validator=response_validator,
             )
             if fallback_payload is not None:
                 self.model_name = self.fallback_model
@@ -320,61 +368,18 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             raise last_exc
         raise CopilotProviderError(f"Gemini API returned HTTP {last_status or 503}")
 
-    async def chat(self, system_prompt: str, user_prompt: str) -> CopilotChatPayload:
-        if not self.api_key:
-            raise CopilotProviderError("GEMINI_API_KEY is not configured on the server")
-
-        self.model_name = self.primary_model_name
-        deadline = time.monotonic() + self.timeout_seconds
-
-        # 1. Attempt primary model (with self.max_retries, default 1)
-        payload, last_status, last_exc = await self._execute_model(
-            model_name=self.primary_model_name,
+    async def analyze(self, system_prompt: str, user_prompt: str) -> CopilotAnalysisPayload:
+        return await self._execute_with_failover(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            deadline=deadline,
-            model_retries=self.max_retries,
+            response_schema=COPILOT_RESPONSE_SCHEMA,
+            response_validator=CopilotAnalysisPayload.model_validate_json,
+        )
+
+    async def chat(self, system_prompt: str, user_prompt: str) -> CopilotChatPayload:
+        return await self._execute_with_failover(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             response_schema=COPILOT_CHAT_RESPONSE_SCHEMA,
             response_validator=CopilotChatPayload.model_validate_json,
         )
-
-        if payload is not None:
-            self.model_name = self.primary_model_name
-            return payload
-
-        # 2. Check if eligible for fallback model
-        is_transient_failure = (
-            last_status in self.FALLBACK_STATUS_CODES
-            or isinstance(last_exc, CopilotTimeoutError)
-        )
-        if (
-            self.fallback_model
-            and self.fallback_model != self.primary_model_name
-            and is_transient_failure
-            and (deadline - time.monotonic()) > 0
-        ):
-            logger.warning(
-                "Primary model exhausted retries; trying fallback model=%s for chat",
-                self.fallback_model,
-            )
-            fallback_payload, fb_status, fb_exc = await self._execute_model(
-                model_name=self.fallback_model,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                deadline=deadline,
-                model_retries=self.fallback_max_retries,
-                response_schema=COPILOT_CHAT_RESPONSE_SCHEMA,
-                response_validator=CopilotChatPayload.model_validate_json,
-            )
-            if fallback_payload is not None:
-                self.model_name = self.fallback_model
-                return fallback_payload
-
-            if fb_exc:
-                raise fb_exc
-            raise CopilotProviderError(f"Gemini API returned HTTP {fb_status or last_status or 503}")
-
-        # No fallback or not eligible for fallback
-        if last_exc:
-            raise last_exc
-        raise CopilotProviderError(f"Gemini API returned HTTP {last_status or 503}")

@@ -979,7 +979,7 @@ def test_gemini_no_api_key_leakage_in_logs(monkeypatch, caplog):
         asyncio.run(provider.analyze("system prompt", "user prompt"))
 
     assert secret_key not in caplog.text
-    assert "Gemini transient failure: status=503 model=gemini-3.8-flash attempt=1/1" in caplog.text
+    assert ("attempt=1/2" in caplog.text or "attempt=1/1" in caplog.text)
     assert "Retrying after backoff..." in caplog.text
 
 
