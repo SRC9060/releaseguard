@@ -8,6 +8,7 @@ import {
   validateCopilotResponse,
   validateCopilotChatResponse,
   formatEvidenceBadge,
+  formatModelBadge,
   isAutonomousActionAllowed,
 } from './copilot.js';
 
@@ -604,4 +605,69 @@ test('api.sendIncidentCopilotChat: propagates 504 timeout safely', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ============================================================================
+// Phase 15D — Production Hardening & Evaluation Suite
+// ============================================================================
+
+test('Phase 15D: formatModelBadge formats primary vs fallback models correctly', () => {
+  assert.equal(formatModelBadge('gemini-3.8-flash'), 'gemini-3.8-flash');
+  assert.equal(formatModelBadge('gemini-3.5-flash-lite'), 'gemini-3.5-flash-lite (Fallback)');
+  assert.equal(formatModelBadge('mock-copilot-lite'), 'mock-copilot-lite (Fallback)');
+  assert.equal(formatModelBadge(null), 'AI Copilot');
+  assert.equal(formatModelBadge(''), 'AI Copilot');
+});
+
+test('Phase 15D: getCopilotErrorState handles HTTP 429 rate limit correctly', () => {
+  const errorState = getCopilotErrorState({ status: 429 });
+  assert.equal(errorState.status, 429);
+  assert.equal(errorState.title, 'Rate Limit Exceeded');
+  assert.ok(errorState.message.includes('rate limit was reached'));
+  assert.equal(errorState.allowRetry, true);
+});
+
+test('Phase 15D: formatEvidenceBadge formats all source types accurately', () => {
+  assert.equal(formatEvidenceBadge({ source_type: 'incident', source_id: '42' }), 'Evidence: Incident #42');
+  assert.equal(formatEvidenceBadge({ source_type: 'issue', source_id: '15' }), 'Evidence: Issue #15');
+  assert.equal(formatEvidenceBadge({ source_type: 'release', source_id: 'v1.2.0' }), 'Evidence: Release #v1.2.0');
+  assert.equal(formatEvidenceBadge({ source_type: 'feature_flag', source_id: 'enable_checkout' }), 'Evidence: Feature Flag #enable_checkout');
+  assert.equal(formatEvidenceBadge({ source_type: 'mitigation', source_id: '3' }), 'Evidence: Mitigation #3');
+  assert.equal(formatEvidenceBadge({ source_type: 'timeline', source_id: '7' }), 'Evidence: Timeline Event #7');
+  assert.equal(formatEvidenceBadge({ source_type: 'custom', source_id: null }), 'Evidence: custom');
+  assert.equal(formatEvidenceBadge(null), 'Evidence');
+});
+
+test('Phase 15D: Safety guarantees — autonomous action is strictly disallowed', () => {
+  assert.equal(isAutonomousActionAllowed(), false);
+  assert.ok(COPILOT_ADVISORY_NOTICE.includes('advisory'));
+  assert.ok(COPILOT_NO_AUTONOMOUS_ACTION_NOTICE.includes('does not automatically modify'));
+  assert.ok(COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE.includes('cannot directly modify production'));
+});
+
+test('Phase 15D: validateCopilotChatResponse checks required fields and arrays', () => {
+  // Valid response
+  const valid = validateCopilotChatResponse({
+    answer: 'Hypothesis H1 is probable based on release v2.4.1.',
+    evidence: [{ source_type: 'release', source_id: 'v2.4.1', claim: 'Deployed prior to error spike' }],
+    uncertainties: ['CPU metrics unavailable'],
+  });
+  assert.equal(valid.valid, true);
+
+  // Missing answer
+  const missingAnswer = validateCopilotChatResponse({
+    evidence: [],
+    uncertainties: [],
+  });
+  assert.equal(missingAnswer.valid, false);
+  assert.ok(missingAnswer.error.includes('answer string'));
+
+  // Non-array evidence
+  const invalidEvidence = validateCopilotChatResponse({
+    answer: 'An answer',
+    evidence: 'not-an-array',
+    uncertainties: [],
+  });
+  assert.equal(invalidEvidence.valid, false);
+  assert.ok(invalidEvidence.error.includes('evidence array'));
 });

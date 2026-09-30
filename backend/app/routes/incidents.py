@@ -30,10 +30,13 @@ from app.copilot import (
     CopilotService,
     CopilotTimeoutError,
 )
+from app.copilot.context import IncidentContextBuilder
+from app.copilot.limiter import copilot_limiter
 from app.db import get_db
 from app.incidents import CorrelationService, MitigationService, SpikeDetectionService
 from app.models import (
     Incident,
+    IncidentCopilotAnalysis,
     IncidentEvent,
     IncidentIssue,
     IncidentMitigation,
@@ -1005,6 +1008,31 @@ async def analyze_incident_with_copilot(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
 
     force_refresh = payload.force_refresh if payload else False
+    context = IncidentContextBuilder.build_context(incident, db)
+    context_hash = IncidentContextBuilder.compute_context_hash(context)
+
+    # Check if a cached analysis exists
+    cached_record = None
+    if not force_refresh:
+        cached_record = (
+            db.query(IncidentCopilotAnalysis)
+            .filter(
+                IncidentCopilotAnalysis.incident_id == incident.id,
+                IncidentCopilotAnalysis.context_hash == context_hash,
+            )
+            .first()
+        )
+
+    # If no cached analysis exists or force_refresh is True, enforce request protection
+    if cached_record is None:
+        allowed, reason = copilot_limiter.check_and_acquire(
+            user_id=current_user.id,
+            incident_id=incident.id,
+            action="analyze",
+            payload_text=f"{force_refresh}:{context_hash}",
+        )
+        if not allowed:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
 
     try:
         result = await CopilotService.analyze_incident(
@@ -1099,6 +1127,15 @@ async def chat_with_incident_copilot(
     )
     if not incident:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    allowed, reason = copilot_limiter.check_and_acquire(
+        user_id=current_user.id,
+        incident_id=incident.id,
+        action="chat",
+        payload_text=payload.message,
+    )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=reason)
 
     try:
         response = await CopilotService.chat_incident(

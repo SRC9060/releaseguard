@@ -61,6 +61,16 @@ export function getCopilotErrorState(err) {
     };
   }
 
+  if (status === 429) {
+    return {
+      status: 429,
+      title: 'Rate Limit Exceeded',
+      message:
+        'A Copilot request is already being processed or the rate limit was reached. Please wait a moment before trying again.',
+      allowRetry: true,
+    };
+  }
+
   if (status === 404) {
     return {
       status: 404,
@@ -168,3 +178,15 @@ export function formatEvidenceBadge(evidenceItem) {
   }
   return `Evidence: ${label}`;
 }
+
+/**
+ * Formats model badge text, highlighting fallback model when used.
+ */
+export function formatModelBadge(modelName) {
+  if (!modelName) return 'AI Copilot';
+  if (modelName.includes('3.5-flash-lite') || modelName.includes('lite') || modelName.includes('fallback')) {
+    return `${modelName} (Fallback)`;
+  }
+  return modelName;
+}
+

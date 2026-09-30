@@ -2,6 +2,7 @@
 Mock provider implementation for deterministic, isolated, and offline testing.
 """
 
+import re
 from typing import Any, Optional
 from app.copilot.providers.base import (
     BaseCopilotProvider,
@@ -100,7 +101,19 @@ class MockCopilotProvider(BaseCopilotProvider):
                         "Third-party webhook payload format may differ from test environment expectations."
                     ],
                     likelihood="probable",
-                )
+                ),
+                Hypothesis(
+                    id="H2",
+                    title="Database connection pool saturation under retried requests",
+                    explanation="Downstream timeout cascades caused request retries, exhausting available connection pool workers.",
+                    evidence=[
+                        "504 Gateway Timeout errors observed concurrently across payment workers.",
+                    ],
+                    inference=[
+                        "Retries without exponential backoff may have compounded database thread exhaustion.",
+                    ],
+                    likelihood="plausible",
+                ),
             ],
             recommended_actions=[
                 RecommendedAction(
@@ -162,20 +175,27 @@ class MockCopilotProvider(BaseCopilotProvider):
 
         if "h1" in question_lower:
             if has_persisted_analysis and '"id": "h1"' in question_lower:
-                return CopilotChatPayload(
-                    answer="Hypothesis H1 is probable because the newly enabled feature flag correlates temporally with error spikes in payment processing.",
-                    evidence=[
+                iss_match = re.search(r'"linked_issues":\s*\[\s*\{\s*"id":\s*(\d+)', user_prompt)
+                issue_id = iss_match.group(1) if iss_match else "1"
+                evidence_items = [
+                    CopilotChatEvidenceItem(
+                        source_type="issue",
+                        source_id=issue_id,
+                        claim=f"Issue #{issue_id} occurred 45 times across the incident window",
+                    ),
+                ]
+                flag_match = re.search(r'"feature_flags":\s*\[\s*\{\s*"key":\s*"([^"]+)"', user_prompt)
+                if flag_match:
+                    evidence_items.append(
                         CopilotChatEvidenceItem(
                             source_type="feature_flag",
-                            source_id="enable_stripe_v3",
-                            claim="Feature flag enable_stripe_v3 was enabled 10 minutes prior to error onset",
-                        ),
-                        CopilotChatEvidenceItem(
-                            source_type="issue",
-                            source_id=1,
-                            claim="Issue #1 occurred 45 times across the incident window",
-                        ),
-                    ],
+                            source_id=flag_match.group(1),
+                            claim=f"Feature flag {flag_match.group(1)} was enabled 10 minutes prior to error onset",
+                        )
+                    )
+                return CopilotChatPayload(
+                    answer="Hypothesis H1 is probable because the newly enabled feature flag correlates temporally with error spikes in payment processing.",
+                    evidence=evidence_items,
                     uncertainties=[
                         "Database connection pool metrics are not visible in telemetry",
                     ],
@@ -188,6 +208,56 @@ class MockCopilotProvider(BaseCopilotProvider):
                         "No structured hypothesis H1 exists in the incident telemetry or persisted analysis",
                     ],
                 )
+
+        # Handling for questions regarding telemetry missing from ReleaseGuard
+        if "cpu" in question_lower:
+            return CopilotChatPayload(
+                answer="CPU usage metrics are not available in ReleaseGuard incident telemetry. Please inspect APM or infrastructure monitoring tools (such as Prometheus, CloudWatch, or Datadog) to verify host and container CPU saturation during the incident window.",
+                evidence=[],
+                uncertainties=[
+                    "CPU utilization telemetry is not available within ReleaseGuard.",
+                ],
+            )
+        elif "connection-pool" in question_lower or "connection pool" in question_lower:
+            return CopilotChatPayload(
+                answer="Database connection-pool utilization is not available in current incident telemetry. Operators should inspect database server metrics or connection pool logs to determine if pool exhaustion occurred.",
+                evidence=[],
+                uncertainties=[
+                    "Database connection-pool utilization metrics are not available within ReleaseGuard.",
+                ],
+            )
+        elif "which customer" in question_lower or "customer was affected" in question_lower:
+            return CopilotChatPayload(
+                answer="Specific customer identities and affected account IDs are not available in ReleaseGuard aggregated incident telemetry. Check support tickets, access logs, or billing events to identify impacted customers.",
+                evidence=[],
+                uncertainties=[
+                    "Customer-specific identity records are not available within ReleaseGuard telemetry.",
+                ],
+            )
+        elif "source-code line" in question_lower or "source code line" in question_lower or "exact line" in question_lower:
+            return CopilotChatPayload(
+                answer="The exact source-code line that triggered the timeout is unavailable in captured stack traces. Review the trace telemetry and application repository at the deployed release commit to verify the timeout location.",
+                evidence=[],
+                uncertainties=[
+                    "Exact source-code line for the timeout is not present in available stack traces.",
+                ],
+            )
+        elif "requests per second" in question_lower or "how many requests" in question_lower or "rps" in question_lower:
+            return CopilotChatPayload(
+                answer="Requests per second (RPS) throughput metrics are not available in ReleaseGuard error ingestion. Review API gateway or ingress proxy monitoring to inspect traffic volume during the incident.",
+                evidence=[],
+                uncertainties=[
+                    "Requests per second (RPS) throughput metrics are not available within ReleaseGuard.",
+                ],
+            )
+        elif "sdk" in question_lower or "formatting" in question_lower:
+            return CopilotChatPayload(
+                answer="An unhandled KeyError formatting exception occurred in the ReleaseGuard SDK event payload processor.",
+                evidence=[],
+                uncertainties=[
+                    "Stack trace does not include caller arguments.",
+                ],
+            )
 
         return CopilotChatPayload(
             answer="The primary evidence points to release v2.4.0 and related error spikes in webhook processing.",

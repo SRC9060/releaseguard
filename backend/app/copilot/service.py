@@ -6,7 +6,8 @@ Guarantees tenant isolation, safe error handling, and zero state corruption on f
 
 import json
 import logging
-from typing import List, Optional
+import time
+from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
@@ -33,7 +34,18 @@ from app.copilot.schemas import (
     CopilotChatResponse,
     CopilotChatMessageResponse,
 )
-from app.models import Incident, IncidentCopilotAnalysis, IncidentCopilotMessage, utcnow
+from app.models import (
+    ErrorEvent,
+    FeatureFlag,
+    Incident,
+    IncidentCopilotAnalysis,
+    IncidentCopilotMessage,
+    IncidentEvent,
+    IncidentMitigation,
+    Issue,
+    Release,
+    utcnow,
+)
 
 logger = logging.getLogger("releaseguard.copilot.service")
 
@@ -43,6 +55,140 @@ class CopilotService:
     Coordinates incident analysis workflows.
     Reuses existing models and services, respects RBAC, and caches results by context hash.
     """
+
+    @classmethod
+    def validate_evidence_integrity(
+        cls,
+        evidence_items: List[CopilotChatEvidenceItem],
+        incident: Incident,
+        db: Session,
+    ) -> Tuple[List[CopilotChatEvidenceItem], List[str]]:
+        """
+        Validates that every evidence citation returned by Copilot corresponds to
+        an authentic entity within the current authorized project and tenant.
+        Discards unverified citations and returns discarded notes to append to uncertainties.
+        """
+        valid_items: List[CopilotChatEvidenceItem] = []
+        discarded_notes: List[str] = []
+
+        project_id = incident.project_id
+        tenant_id = incident.tenant_id
+
+        for item in evidence_items:
+            source_type = (item.source_type or "").strip().lower()
+            source_id = item.source_id
+            is_valid = False
+
+            if source_type == "incident":
+                try:
+                    inc_id = int(source_id)
+                    inc = (
+                        db.query(Incident)
+                        .filter(
+                            Incident.id == inc_id,
+                            Incident.project_id == project_id,
+                            Incident.tenant_id == tenant_id,
+                        )
+                        .first()
+                    )
+                    is_valid = inc is not None
+                except (ValueError, TypeError):
+                    is_valid = False
+
+            elif source_type == "issue":
+                try:
+                    iss_id = int(source_id)
+                    iss = (
+                        db.query(Issue)
+                        .filter(Issue.id == iss_id, Issue.project_id == project_id)
+                        .first()
+                    )
+                    is_valid = iss is not None
+                except (ValueError, TypeError):
+                    is_valid = False
+
+            elif source_type == "release":
+                try:
+                    rel = (
+                        db.query(Release)
+                        .filter(
+                            (Release.id == int(source_id)) if str(source_id).isdigit() else (Release.version == str(source_id)),
+                            Release.project_id == project_id,
+                        )
+                        .first()
+                    )
+                    is_valid = rel is not None
+                except Exception:
+                    is_valid = False
+
+            elif source_type in ("feature_flag", "flag_audit"):
+                try:
+                    flag = (
+                        db.query(FeatureFlag)
+                        .filter(
+                            (FeatureFlag.id == int(source_id)) if str(source_id).isdigit() else (FeatureFlag.key == str(source_id)),
+                            FeatureFlag.project_id == project_id,
+                        )
+                        .first()
+                    )
+                    is_valid = flag is not None
+                except Exception:
+                    is_valid = False
+
+            elif source_type == "mitigation":
+                try:
+                    mit_id = int(source_id)
+                    mit = (
+                        db.query(IncidentMitigation)
+                        .join(Incident, IncidentMitigation.incident_id == Incident.id)
+                        .filter(
+                            IncidentMitigation.id == mit_id,
+                            Incident.project_id == project_id,
+                        )
+                        .first()
+                    )
+                    is_valid = mit is not None
+                except (ValueError, TypeError):
+                    is_valid = False
+
+            elif source_type in ("timeline", "event"):
+                try:
+                    ev = (
+                        db.query(IncidentEvent)
+                        .filter(
+                            IncidentEvent.id == int(source_id),
+                            IncidentEvent.incident_id == incident.id,
+                        )
+                        .first()
+                    )
+                    if not ev and isinstance(source_id, str):
+                        ev = (
+                            db.query(ErrorEvent)
+                            .filter(
+                                ErrorEvent.event_id == source_id,
+                                ErrorEvent.project_id == project_id,
+                            )
+                            .first()
+                        )
+                    is_valid = ev is not None
+                except Exception:
+                    is_valid = False
+
+            if is_valid:
+                valid_items.append(item)
+            else:
+                logger.warning(
+                    "Copilot cited unverified evidence: source_type=%s source_id=%s for incident #%d in project #%d",
+                    item.source_type,
+                    item.source_id,
+                    incident.id,
+                    project_id,
+                )
+                discarded_notes.append(
+                    f"Unverified evidence citation discarded: '{item.source_type}' reference '{item.source_id}' does not exist in authorized project #{project_id}."
+                )
+
+        return valid_items, discarded_notes
 
     @classmethod
     async def analyze_incident(
@@ -56,9 +202,12 @@ class CopilotService:
         Generates or retrieves a cached AI analysis for a given incident.
         Guarantees that provider failures do not alter or damage the incident record.
         """
+        start_time = time.monotonic()
         # 1. Build authorized, sanitized context
+        t0 = time.monotonic()
         context = IncidentContextBuilder.build_context(incident, db)
         context_hash = IncidentContextBuilder.compute_context_hash(context)
+        context_build_ms = round((time.monotonic() - t0) * 1000, 2)
 
         # 2. Check for matching cached analysis if force_refresh is not requested
         if not force_refresh:
@@ -74,6 +223,14 @@ class CopilotService:
             if cached_record is not None:
                 try:
                     payload = CopilotAnalysisPayload.model_validate_json(cached_record.analysis_json)
+                    total_request_ms = round((time.monotonic() - start_time) * 1000, 2)
+                    logger.info(
+                        "Copilot analysis metrics: context_build_ms=%.2f provider_request_ms=0.00 total_request_ms=%.2f model_used=%s provider_used=%s cache_hit=True fallback_used=False",
+                        context_build_ms,
+                        total_request_ms,
+                        cached_record.model,
+                        cached_record.provider,
+                    )
                     return CopilotAnalysisResponse(
                         id=cached_record.id,
                         incident_id=incident.id,
@@ -96,9 +253,25 @@ class CopilotService:
 
         # 5. Execute model analysis
         logger.info("Executing Copilot analysis for incident #%d using provider '%s'", incident.id, active_provider.provider_name)
+        t1 = time.monotonic()
         analysis_payload = await active_provider.analyze(
             system_prompt=COPILOT_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+        )
+        provider_request_ms = round((time.monotonic() - t1) * 1000, 2)
+        total_request_ms = round((time.monotonic() - start_time) * 1000, 2)
+        fallback_used = (
+            getattr(active_provider, "model_name", None) == getattr(active_provider, "fallback_model", None)
+            and getattr(active_provider, "fallback_model", None) is not None
+        )
+        logger.info(
+            "Copilot analysis metrics: context_build_ms=%.2f provider_request_ms=%.2f total_request_ms=%.2f model_used=%s provider_used=%s cache_hit=False fallback_used=%s",
+            context_build_ms,
+            provider_request_ms,
+            total_request_ms,
+            active_provider.model_name,
+            active_provider.provider_name,
+            fallback_used,
         )
 
         # 6. Persist generated analysis
@@ -194,10 +367,13 @@ class CopilotService:
         - Return CopilotChatResponse.
         """
         # 1. Clean user message
+        start_time = time.monotonic()
         clean_user_message = scrub_secrets(user_message.strip())
 
         # 2. Get or build authorized, sanitized incident context & hash
+        t0 = time.monotonic()
         context, context_hash = IncidentContextBuilder.get_or_build_context(incident, db)
+        context_build_ms = round((time.monotonic() - t0) * 1000, 2)
 
         # 3. Retrieve latest analysis if available (strictly tenant and project scoped)
         latest_analysis = cls.get_latest_analysis(
@@ -235,7 +411,7 @@ class CopilotService:
                     pass
             chat_history_dicts.append({
                 "role": m.role,
-                "content": text_content,
+                "content": scrub_secrets(text_content),
             })
 
         # 5. Persist user message record
@@ -269,10 +445,36 @@ class CopilotService:
             incident.id,
             active_provider.provider_name,
         )
+        t1 = time.monotonic()
         chat_payload = await active_provider.chat(
             system_prompt=COPILOT_CHAT_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
+        provider_request_ms = round((time.monotonic() - t1) * 1000, 2)
+        total_request_ms = round((time.monotonic() - start_time) * 1000, 2)
+        fallback_used = (
+            getattr(active_provider, "model_name", None) == getattr(active_provider, "fallback_model", None)
+            and getattr(active_provider, "fallback_model", None) is not None
+        )
+        logger.info(
+            "Copilot chat metrics: context_build_ms=%.2f provider_request_ms=%.2f total_request_ms=%.2f model_used=%s provider_used=%s cache_hit=False fallback_used=%s",
+            context_build_ms,
+            provider_request_ms,
+            total_request_ms,
+            active_provider.model_name,
+            active_provider.provider_name,
+            fallback_used,
+        )
+
+        # Validate evidence citations against current authorized project & tenant
+        validated_evidence, discarded_notes = cls.validate_evidence_integrity(
+            evidence_items=chat_payload.evidence,
+            incident=incident,
+            db=db,
+        )
+        chat_payload.evidence = validated_evidence
+        if discarded_notes:
+            chat_payload.uncertainties.extend(discarded_notes)
 
         # 8. Persist assistant message record
         assistant_now = utcnow()
