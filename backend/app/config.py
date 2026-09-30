@@ -59,6 +59,7 @@ class Settings:
         self.OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
         self.OPENAI_BASE_URL: str | None = os.getenv("OPENAI_BASE_URL")
         self.COPILOT_TIMEOUT_SECONDS: float = float(os.getenv("COPILOT_TIMEOUT_SECONDS", "30.0"))
+        self.COPILOT_CHAT_HISTORY_LIMIT: int = int(os.getenv("COPILOT_CHAT_HISTORY_LIMIT", "12"))
 
     def validate_production(self) -> None:
         """Validates critical security configuration for production deployments."""

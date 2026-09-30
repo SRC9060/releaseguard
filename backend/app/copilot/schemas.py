@@ -5,7 +5,7 @@ Every hypothesis must distinguish evidence from inference.
 """
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
@@ -240,4 +240,112 @@ COPILOT_RESPONSE_SCHEMA = {
         },
     },
     "required": ["summary", "hypotheses", "recommended_actions", "evidence", "uncertainties"],
+}
+
+
+# =========================================================================
+# Phase 15C — Conversational Incident Copilot Schemas
+# =========================================================================
+
+class CopilotChatEvidenceItem(BaseModel):
+    source_type: Literal[
+        "incident",
+        "issue",
+        "release",
+        "feature_flag",
+        "flag_audit",
+        "mitigation",
+        "timeline",
+        "event",
+    ] = Field(description="Originating category of evidence")
+    source_id: Optional[Union[int, str]] = Field(default=None, description="Identifier of the source entity (e.g. issue ID, release version, flag key)")
+    claim: str = Field(description="Objective factual claim supported by this source")
+
+
+class CopilotChatPayload(BaseModel):
+    answer: str = Field(description="Natural-language response to the user's question, grounded strictly in available incident telemetry")
+    evidence: List[CopilotChatEvidenceItem] = Field(default_factory=list, description="Structured evidence references supporting the answer")
+    uncertainties: List[str] = Field(default_factory=list, description="Telemetry gaps, missing data points, or unverified aspects")
+
+
+class CopilotChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000, description="User question about the incident")
+
+
+class CopilotChatResponse(BaseModel):
+    id: int
+    incident_id: int
+    user_message: str
+    answer: str
+    model: str
+    cached: bool = False
+    created_at: datetime
+    evidence: List[CopilotChatEvidenceItem] = Field(default_factory=list)
+    uncertainties: List[str] = Field(default_factory=list)
+
+
+class CopilotChatMessageResponse(BaseModel):
+    id: int
+    incident_id: int
+    user_id: int
+    role: str  # "user" | "assistant"
+    content: str
+    created_at: datetime
+    context_hash: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    answer: Optional[str] = None
+    evidence: Optional[List[CopilotChatEvidenceItem]] = None
+    uncertainties: Optional[List[str]] = None
+
+
+COPILOT_CHAT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "description": "Conversational incident investigation answer grounded in authorized telemetry.",
+    "properties": {
+        "answer": {
+            "type": "string",
+            "description": "Natural-language answer to the user's question about the incident, citing evidence and distinguishing facts from inferences.",
+        },
+        "evidence": {
+            "type": "array",
+            "description": "Structured evidence citations supporting the claims in the answer.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source_type": {
+                        "type": "string",
+                        "enum": [
+                            "incident",
+                            "issue",
+                            "release",
+                            "feature_flag",
+                            "flag_audit",
+                            "mitigation",
+                            "timeline",
+                            "event",
+                        ],
+                        "description": "Category of evidence source",
+                    },
+                    "source_id": {
+                        "type": "string",
+                        "description": "Identifier of the source entity (e.g. '1', 'v2.4.0', 'flag_key')",
+                    },
+                    "claim": {
+                        "type": "string",
+                        "description": "Factual statement supported by the telemetry",
+                    },
+                },
+                "required": ["source_type", "claim"],
+            },
+        },
+        "uncertainties": {
+            "type": "array",
+            "description": "Specific missing data, telemetry gaps, or verification steps needed.",
+            "items": {
+                "type": "string",
+            },
+        },
+    },
+    "required": ["answer", "evidence", "uncertainties"],
 }

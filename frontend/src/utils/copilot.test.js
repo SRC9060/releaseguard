@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import {
   COPILOT_ADVISORY_NOTICE,
   COPILOT_NO_AUTONOMOUS_ACTION_NOTICE,
+  COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE,
   getCopilotErrorState,
   validateCopilotResponse,
+  validateCopilotChatResponse,
+  formatEvidenceBadge,
   isAutonomousActionAllowed,
 } from './copilot.js';
 
@@ -382,6 +385,219 @@ test('api.analyzeIncidentCopilot: propagates 502 malformed response as ApiError'
       (err) => {
         assert.ok(err instanceof ApiError);
         assert.equal(err.status, 502);
+        return true;
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// =========================================================================
+// Phase 15C: Conversational AI Incident Copilot Tests
+// =========================================================================
+
+test('Copilot Safety Guarantee: Copilot cannot directly modify production systems', () => {
+  assert.equal(
+    COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE,
+    'Copilot cannot directly modify production systems.'
+  );
+  assert.equal(isAutonomousActionAllowed(), false);
+});
+
+test('validateCopilotChatResponse: accepts valid Phase 15C structured chat response', () => {
+  const validResponse = {
+    id: 10,
+    incident_id: 3,
+    user_message: 'Why do you think H1 is probable?',
+    answer: 'The strongest evidence is the error spike immediately following release v2.4.0.',
+    model: 'gemini-3.8-flash',
+    cached: false,
+    created_at: '2026-09-30T12:00:00Z',
+    evidence: [
+      {
+        source_type: 'issue',
+        source_id: 1,
+        claim: 'Issue #1 surged to 45 occurrences in 15 minutes',
+      },
+      {
+        source_type: 'release',
+        source_id: 'v2.4.0',
+        claim: 'Release v2.4.0 deployed 15 minutes before error onset',
+      },
+    ],
+    uncertainties: ['Database connection saturation data is not available'],
+  };
+
+  const result = validateCopilotChatResponse(validResponse);
+  assert.equal(result.valid, true);
+});
+
+test('validateCopilotChatResponse: rejects malformed or missing fields', () => {
+  assert.equal(validateCopilotChatResponse(null).valid, false);
+  assert.equal(validateCopilotChatResponse({}).valid, false);
+  assert.equal(validateCopilotChatResponse({ answer: '' }).valid, false);
+  assert.equal(
+    validateCopilotChatResponse({ answer: 'Valid answer', evidence: 'not-an-array' }).valid,
+    false
+  );
+  assert.equal(
+    validateCopilotChatResponse({
+      answer: 'Valid answer',
+      evidence: [],
+      uncertainties: 'not-an-array',
+    }).valid,
+    false
+  );
+});
+
+test('formatEvidenceBadge: accurately formats source types and IDs', () => {
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'issue', source_id: 1, claim: 'claim' }),
+    'Evidence: Issue #1'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'release', source_id: 'v2.4.0', claim: 'claim' }),
+    'Evidence: Release #v2.4.0'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'feature_flag', source_id: 'stripe_v3', claim: 'claim' }),
+    'Evidence: Feature Flag #stripe_v3'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'flag_audit', source_id: 42, claim: 'claim' }),
+    'Evidence: Flag Audit #42'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'timeline', source_id: 5, claim: 'claim' }),
+    'Evidence: Timeline Event #5'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'mitigation', source_id: 2, claim: 'claim' }),
+    'Evidence: Mitigation #2'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'event', source_id: 'ev-123', claim: 'claim' }),
+    'Evidence: Event #ev-123'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'incident', source_id: 3, claim: 'claim' }),
+    'Evidence: Incident #3'
+  );
+  assert.equal(
+    formatEvidenceBadge({ source_type: 'incident', source_id: null, claim: 'claim' }),
+    'Evidence: Incident'
+  );
+  assert.equal(formatEvidenceBadge(null), 'Evidence');
+});
+
+test('api.getIncidentCopilotChat: fetches conversation history with limit', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: 1,
+          incident_id: 42,
+          role: 'user',
+          content: 'Why is H1 likely?',
+          created_at: '2026-09-30T10:00:00Z',
+        },
+        {
+          id: 2,
+          incident_id: 42,
+          role: 'assistant',
+          content: 'Based on telemetry, H1 is supported by Issue #1.',
+          answer: 'Based on telemetry, H1 is supported by Issue #1.',
+          evidence: [{ source_type: 'issue', source_id: 1, claim: 'High error rate' }],
+          uncertainties: [],
+          created_at: '2026-09-30T10:00:05Z',
+        },
+      ],
+    };
+  };
+
+  try {
+    const { default: api } = await import('../services/api.js');
+    const result = await api.getIncidentCopilotChat(1, 2, 42, 25);
+    assert.ok(requestedUrl.includes('/api/v1/tenants/1/projects/2/incidents/42/copilot/chat?limit=25'));
+    assert.equal(result.length, 2);
+    assert.equal(result[0].role, 'user');
+    assert.equal(result[1].role, 'assistant');
+    assert.equal(result[1].evidence.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('api.sendIncidentCopilotChat: sends inquiry and receives structured answer', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+  let capturedUrl = null;
+
+  globalThis.fetch = async (url, options) => {
+    capturedUrl = url;
+    capturedBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 105,
+        incident_id: 42,
+        user_message: 'What caused the spike?',
+        answer: 'The spike was triggered by deployment v2.4.0.',
+        model: 'gemini-3.8-flash',
+        cached: false,
+        created_at: '2026-09-30T12:00:00Z',
+        evidence: [
+          { source_type: 'release', source_id: 'v2.4.0', claim: 'Deployed 10 minutes prior' },
+        ],
+        uncertainties: ['DB connection pool telemetry missing'],
+      }),
+    };
+  };
+
+  try {
+    const { default: api } = await import('../services/api.js');
+    const result = await api.sendIncidentCopilotChat(1, 2, 42, 'What caused the spike?');
+    assert.ok(capturedUrl.includes('/api/v1/tenants/1/projects/2/incidents/42/copilot/chat'));
+    assert.equal(capturedBody.message, 'What caused the spike?');
+    assert.equal(result.answer, 'The spike was triggered by deployment v2.4.0.');
+    assert.equal(result.evidence.length, 1);
+    assert.equal(result.evidence[0].source_id, 'v2.4.0');
+    assert.equal(result.uncertainties.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('api.sendIncidentCopilotChat: propagates 504 timeout safely', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 504,
+    json: async () => ({ detail: 'AI Copilot provider timed out' }),
+  });
+
+  try {
+    const { default: api, ApiError } = await import('../services/api.js');
+    await assert.rejects(
+      async () => {
+        await api.sendIncidentCopilotChat(1, 2, 42, 'Question');
+      },
+      (err) => {
+        assert.ok(err instanceof ApiError);
+        assert.equal(err.status, 504);
+        const errorState = getCopilotErrorState(err);
+        assert.equal(errorState.status, 504);
+        assert.ok(errorState.title.includes('Timed Out'));
+        assert.equal(errorState.allowRetry, true);
         return true;
       }
     );

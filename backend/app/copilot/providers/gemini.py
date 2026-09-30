@@ -10,7 +10,7 @@ import json
 import logging
 import random
 import time
-from typing import Optional, Set
+from typing import Any, Callable, Optional, Set
 import httpx
 from pydantic import ValidationError
 
@@ -20,7 +20,12 @@ from app.copilot.providers.base import (
     CopilotResponseParseError,
     CopilotTimeoutError,
 )
-from app.copilot.schemas import COPILOT_RESPONSE_SCHEMA, CopilotAnalysisPayload
+from app.copilot.schemas import (
+    COPILOT_RESPONSE_SCHEMA,
+    COPILOT_CHAT_RESPONSE_SCHEMA,
+    CopilotAnalysisPayload,
+    CopilotChatPayload,
+)
 from app.logging import redact_sensitive
 
 logger = logging.getLogger("releaseguard.copilot.gemini")
@@ -87,7 +92,11 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         jitter = random.uniform(0.0, min(0.25, 0.15 * delay) if delay > 0 else 0.0)
         return delay + jitter
 
-    def _parse_candidate_response(self, data: dict) -> CopilotAnalysisPayload:
+    def _parse_candidate_response(
+        self,
+        data: dict,
+        validator: Optional[Callable[[str], Any]] = None,
+    ) -> Any:
         candidates = data.get("candidates", [])
         if not candidates:
             raise CopilotResponseParseError("Gemini API returned no completion candidates")
@@ -107,7 +116,8 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             raw_text = raw_text[:-3]
         raw_text = raw_text.strip()
 
-        return CopilotAnalysisPayload.model_validate_json(raw_text)
+        val_fn = validator or CopilotAnalysisPayload.model_validate_json
+        return val_fn(raw_text)
 
     async def _execute_model(
         self,
@@ -116,12 +126,15 @@ class GeminiCopilotProvider(BaseCopilotProvider):
         user_prompt: str,
         deadline: float,
         model_retries: Optional[int] = None,
-    ) -> tuple[Optional[CopilotAnalysisPayload], Optional[int], Optional[Exception]]:
+        response_schema: Optional[dict] = None,
+        response_validator: Optional[Callable[[str], Any]] = None,
+    ) -> tuple[Optional[Any], Optional[int], Optional[Exception]]:
         """
         Executes requests for a specific model with exponential backoff and jitter.
         Returns:
             (payload, last_status_code, last_exception)
         """
+        schema = response_schema or COPILOT_RESPONSE_SCHEMA
         endpoint = f"{self.base_url}/models/{model_name}:generateContent"
         payload = {
             "system_instruction": {
@@ -135,7 +148,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
             ],
             "generationConfig": {
                 "response_mime_type": "application/json",
-                "response_schema": COPILOT_RESPONSE_SCHEMA,
+                "response_schema": schema,
                 "temperature": 0.2,
             }
         }
@@ -169,7 +182,7 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                 if response.status_code == 200:
                     try:
                         data = response.json()
-                        result = self._parse_candidate_response(data)
+                        result = self._parse_candidate_response(data, validator=response_validator)
                         return result, None, None
                     except (ValidationError, KeyError, IndexError, json.JSONDecodeError) as exc:
                         logger.error("Failed to parse Gemini structured response: %s", exc)
@@ -293,6 +306,65 @@ class GeminiCopilotProvider(BaseCopilotProvider):
                 user_prompt=user_prompt,
                 deadline=deadline,
                 model_retries=self.fallback_max_retries,
+            )
+            if fallback_payload is not None:
+                self.model_name = self.fallback_model
+                return fallback_payload
+
+            if fb_exc:
+                raise fb_exc
+            raise CopilotProviderError(f"Gemini API returned HTTP {fb_status or last_status or 503}")
+
+        # No fallback or not eligible for fallback
+        if last_exc:
+            raise last_exc
+        raise CopilotProviderError(f"Gemini API returned HTTP {last_status or 503}")
+
+    async def chat(self, system_prompt: str, user_prompt: str) -> CopilotChatPayload:
+        if not self.api_key:
+            raise CopilotProviderError("GEMINI_API_KEY is not configured on the server")
+
+        self.model_name = self.primary_model_name
+        deadline = time.monotonic() + self.timeout_seconds
+
+        # 1. Attempt primary model (with self.max_retries, default 1)
+        payload, last_status, last_exc = await self._execute_model(
+            model_name=self.primary_model_name,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            deadline=deadline,
+            model_retries=self.max_retries,
+            response_schema=COPILOT_CHAT_RESPONSE_SCHEMA,
+            response_validator=CopilotChatPayload.model_validate_json,
+        )
+
+        if payload is not None:
+            self.model_name = self.primary_model_name
+            return payload
+
+        # 2. Check if eligible for fallback model
+        is_transient_failure = (
+            last_status in self.FALLBACK_STATUS_CODES
+            or isinstance(last_exc, CopilotTimeoutError)
+        )
+        if (
+            self.fallback_model
+            and self.fallback_model != self.primary_model_name
+            and is_transient_failure
+            and (deadline - time.monotonic()) > 0
+        ):
+            logger.warning(
+                "Primary model exhausted retries; trying fallback model=%s for chat",
+                self.fallback_model,
+            )
+            fallback_payload, fb_status, fb_exc = await self._execute_model(
+                model_name=self.fallback_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                deadline=deadline,
+                model_retries=self.fallback_max_retries,
+                response_schema=COPILOT_CHAT_RESPONSE_SCHEMA,
+                response_validator=CopilotChatPayload.model_validate_json,
             )
             if fallback_payload is not None:
                 self.model_name = self.fallback_model

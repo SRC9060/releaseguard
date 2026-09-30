@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import secrets
+from typing import Optional
 import uuid
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
@@ -319,6 +320,7 @@ class Incident(Base):
     mitigations = relationship("IncidentMitigation", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentMitigation.created_at.desc()")
     linked_issues = relationship("IncidentIssue", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentIssue.created_at.asc()")
     copilot_analyses = relationship("IncidentCopilotAnalysis", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentCopilotAnalysis.created_at.desc()")
+    copilot_messages = relationship("IncidentCopilotMessage", back_populates="incident", cascade="all, delete-orphan", order_by="IncidentCopilotMessage.created_at.asc()")
 
 
 class IncidentIssue(Base):
@@ -400,3 +402,24 @@ class IncidentCopilotAnalysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     incident = relationship("Incident", back_populates="copilot_analyses")
+
+
+class IncidentCopilotMessage(Base):
+    __tablename__ = "incident_copilot_messages"
+    __table_args__ = (
+        Index("ix_copilot_messages_incident_created", "incident_id", "created_at"),
+        Index("ix_copilot_messages_incident_user_created", "incident_id", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    context_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    incident = relationship("Incident", back_populates="copilot_messages")
+    user = relationship("User")

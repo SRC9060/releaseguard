@@ -9,6 +9,9 @@ export const COPILOT_ADVISORY_NOTICE =
 export const COPILOT_NO_AUTONOMOUS_ACTION_NOTICE =
   'AI does not automatically modify feature flags, releases, or incident status.';
 
+export const COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE =
+  'Copilot cannot directly modify production systems.';
+
 /**
  * Maps HTTP and network errors from Copilot endpoints into safe, user-friendly UI state.
  * Prevents raw provider stack traces or payloads from leaking to the UI.
@@ -122,4 +125,46 @@ export function validateCopilotResponse(response) {
  */
 export function isAutonomousActionAllowed() {
   return false;
+}
+
+/**
+ * Validates that a conversational chat response conforms to the Phase 15C schema.
+ */
+export function validateCopilotChatResponse(response) {
+  if (!response || typeof response !== 'object') {
+    return { valid: false, error: 'Response must be an object' };
+  }
+  if (typeof response.answer !== 'string' || !response.answer.trim()) {
+    return { valid: false, error: 'Chat response must contain an answer string' };
+  }
+  if (!Array.isArray(response.evidence)) {
+    return { valid: false, error: 'Chat response must contain an evidence array' };
+  }
+  if (!Array.isArray(response.uncertainties)) {
+    return { valid: false, error: 'Chat response must contain an uncertainties array' };
+  }
+  return { valid: true };
+}
+
+/**
+ * Formats structured evidence reference badge for conversational citations.
+ * Format: "Evidence: Issue #1" or "Evidence: Feature Flag #enable_v3"
+ */
+export function formatEvidenceBadge(evidenceItem) {
+  if (!evidenceItem) return 'Evidence';
+  const typeLabels = {
+    incident: 'Incident',
+    issue: 'Issue',
+    release: 'Release',
+    feature_flag: 'Feature Flag',
+    flag_audit: 'Flag Audit',
+    mitigation: 'Mitigation',
+    timeline: 'Timeline Event',
+    event: 'Event',
+  };
+  const label = typeLabels[evidenceItem.source_type] || evidenceItem.source_type || 'Evidence';
+  if (evidenceItem.source_id !== null && evidenceItem.source_id !== undefined && evidenceItem.source_id !== '') {
+    return `Evidence: ${label} #${evidenceItem.source_id}`;
+  }
+  return `Evidence: ${label}`;
 }

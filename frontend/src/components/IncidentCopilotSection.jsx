@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Sparkles,
   RefreshCw,
@@ -14,18 +14,35 @@ import {
   ExternalLink,
   Bot,
   Zap,
+  Send,
+  MessageSquare,
+  User,
+  AlertCircle,
 } from 'lucide-react';
 import api, { ApiError } from '../services/api';
 import { formatExactTimestamp, formatRelativeTime } from '../utils/formatters';
 import {
   COPILOT_ADVISORY_NOTICE,
   COPILOT_NO_AUTONOMOUS_ACTION_NOTICE,
+  COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE,
   getCopilotErrorState,
+  formatEvidenceBadge,
 } from '../utils/copilot';
 
+const SUGGESTED_QUESTIONS = [
+  "Why do you think H1 is probable?",
+  "What evidence supports H1?",
+  "Why is Issue #1 probably not the primary cause?",
+  "What changed immediately before the incident?",
+  "What information is missing to confirm the root cause?",
+  "What should I investigate first?",
+  "What happened during the mitigation?",
+  "What changed when the feature flag was reverted?",
+];
+
 /**
- * Phase 15B — AI Incident Copilot Section
- * Provides evidence-grounded, advisory root-cause analysis for incidents.
+ * Phase 15B & 15C — AI Incident Copilot Section
+ * Provides evidence-grounded, advisory root-cause analysis and conversational investigation.
  * Strictly separates observed evidence from AI inferences.
  * Does not perform autonomous actions or feature-flag modifications.
  */
@@ -34,6 +51,13 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [errorState, setErrorState] = useState(null);
+
+  // Conversational Chat State (Phase 15C)
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState(null);
+  const messagesEndRef = useRef(null);
 
   // Load the latest persisted analysis on mount
   const loadLatestAnalysis = useCallback(async () => {
@@ -60,9 +84,70 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
     }
   }, [tenantId, projectId, incidentId]);
 
+  // Load chat history on mount
+  const loadChatHistory = useCallback(async () => {
+    if (!tenantId || !projectId || !incidentId) return;
+    try {
+      const history = await api.getIncidentCopilotChat(tenantId, projectId, incidentId);
+      if (Array.isArray(history)) {
+        setChatMessages(history);
+      }
+    } catch (err) {
+      console.warn('Failed to load copilot chat history:', err);
+    }
+  }, [tenantId, projectId, incidentId]);
+
   useEffect(() => {
     loadLatestAnalysis();
-  }, [loadLatestAnalysis]);
+    loadChatHistory();
+  }, [loadLatestAnalysis, loadChatHistory]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    if (chatMessages.length > 0) {
+      scrollToBottom();
+    }
+  }, [chatMessages.length]);
+
+  const handleSendChat = async (messageText) => {
+    const textToSend = (messageText || chatInput).trim();
+    if (!textToSend || chatLoading || !tenantId || !projectId || !incidentId) return;
+
+    setChatLoading(true);
+    setChatError(null);
+    setChatInput('');
+
+    // Optimistically record user message
+    const tempUserMsg = {
+      id: `temp-${Date.now()}`,
+      role: 'user',
+      content: textToSend,
+      created_at: new Date().toISOString(),
+    };
+    setChatMessages((prev) => [...prev, tempUserMsg]);
+
+    try {
+      const response = await api.sendIncidentCopilotChat(tenantId, projectId, incidentId, textToSend);
+      const assistantMsg = {
+        id: response.id,
+        role: 'assistant',
+        content: response.answer,
+        answer: response.answer,
+        model: response.model,
+        created_at: response.created_at,
+        evidence: response.evidence || [],
+        uncertainties: response.uncertainties || [],
+      };
+      setChatMessages((prev) => [...prev, assistantMsg]);
+    } catch (err) {
+      setChatError(getCopilotErrorState(err));
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   // Request analysis (or force refresh)
   const handleRunAnalysis = async (forceRefresh = false) => {
@@ -538,6 +623,200 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
           )}
         </div>
       )}
+
+      {/* ============================================================ */}
+      {/* PHASE 15C: CONVERSATIONAL INVESTIGATION CHAT SECTION          */}
+      {/* ============================================================ */}
+      <div
+        data-testid="copilot-chat-section"
+        className="mt-6 pt-5 border-t border-slate-800 space-y-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+              <MessageSquare className="w-4 h-4 text-indigo-400" />
+              Ask Copilot about this incident
+            </h3>
+            <p className="text-[11px] text-slate-400">
+              Conversational inquiry strictly grounded in authorized incident telemetry and timeline.
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] text-amber-400/90 font-mono bg-amber-500/10 px-2.5 py-1 rounded-md border border-amber-500/20">
+            <Shield className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+            <span>{COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE}</span>
+          </div>
+        </div>
+
+        {/* Suggested Question Prompt Pills */}
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {SUGGESTED_QUESTIONS.map((q, idx) => (
+            <button
+              key={idx}
+              type="button"
+              disabled={chatLoading}
+              onClick={() => handleSendChat(q)}
+              className="text-[11px] px-2.5 py-1 rounded-full bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-slate-100 border border-slate-700/60 transition disabled:opacity-50 text-left"
+            >
+              {q}
+            </button>
+          ))}
+        </div>
+
+        {/* Chat Messages Container */}
+        <div
+          data-testid="copilot-chat-messages"
+          className="p-4 bg-slate-950/60 border border-slate-800 rounded-lg max-h-96 overflow-y-auto space-y-3"
+        >
+          {chatMessages.length === 0 ? (
+            <div className="py-6 text-center text-xs text-slate-500 space-y-1">
+              <Bot className="w-6 h-6 mx-auto text-slate-600 mb-1" />
+              <p>No conversation yet for this incident.</p>
+              <p className="text-[11px] text-slate-600">
+                Ask any question about root causes, telemetry evidence, or recent releases.
+              </p>
+            </div>
+          ) : (
+            chatMessages.map((msg, idx) => (
+              <div
+                key={msg.id || idx}
+                data-testid={`copilot-chat-message-${msg.role}`}
+                className={`flex gap-3 text-xs ${
+                  msg.role === 'user' ? 'justify-end' : 'justify-start'
+                }`}
+              >
+                {msg.role === 'assistant' && (
+                  <div className="w-6 h-6 rounded-md bg-indigo-500/20 text-indigo-400 flex items-center justify-center flex-shrink-0 mt-0.5 border border-indigo-500/30">
+                    <Bot className="w-3.5 h-3.5" />
+                  </div>
+                )}
+                <div
+                  className={`max-w-[85%] rounded-lg p-3 space-y-2 ${
+                    msg.role === 'user'
+                      ? 'bg-indigo-600/30 text-indigo-100 border border-indigo-500/40'
+                      : 'bg-slate-800/90 text-slate-200 border border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 font-mono">
+                    <span className="font-semibold uppercase tracking-wider text-slate-300">
+                      {msg.role === 'user' ? 'Operator' : `Copilot (${msg.model || 'AI'})`}
+                    </span>
+                    {msg.created_at && (
+                      <span>{formatRelativeTime(msg.created_at)}</span>
+                    )}
+                  </div>
+
+                  <p className="whitespace-pre-wrap leading-relaxed text-slate-100">
+                    {msg.answer || msg.content}
+                  </p>
+
+                  {/* Evidence Citations */}
+                  {msg.evidence && msg.evidence.length > 0 && (
+                    <div className="pt-2 border-t border-slate-700/60 space-y-1">
+                      <div className="text-[10px] uppercase font-mono text-cyan-400 font-semibold tracking-wider flex items-center gap-1">
+                        <Database className="w-3 h-3 text-cyan-400" />
+                        Evidence Citations ({msg.evidence.length})
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {msg.evidence.map((ev, evIdx) => (
+                          <div
+                            key={evIdx}
+                            data-testid="copilot-chat-evidence-badge"
+                            className="px-2 py-0.5 rounded bg-cyan-950/40 border border-cyan-800/50 text-[10px] text-cyan-300 font-mono flex items-center gap-1"
+                            title={ev.claim}
+                          >
+                            <span className="font-bold">{formatEvidenceBadge(ev)}:</span>
+                            <span className="text-slate-300">{ev.claim}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Uncertainties */}
+                  {msg.uncertainties && msg.uncertainties.length > 0 && (
+                    <div className="pt-1 text-[11px] text-amber-300/90 italic flex items-start gap-1">
+                      <Search className="w-3 h-3 flex-shrink-0 mt-0.5 text-amber-400" />
+                      <span>Uncertainty: {msg.uncertainties.join('; ')}</span>
+                    </div>
+                  )}
+                </div>
+                {msg.role === 'user' && (
+                  <div className="w-6 h-6 rounded-md bg-slate-700 text-slate-300 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <User className="w-3.5 h-3.5" />
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+
+          {/* Loading indicator */}
+          {chatLoading && (
+            <div className="flex items-center gap-2 text-xs text-indigo-400 italic py-1 pl-1">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>Copilot is analyzing incident telemetry and citations...</span>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Chat Error State */}
+        {chatError && (
+          <div
+            data-testid="copilot-chat-error"
+            className="p-3 rounded-lg bg-red-950/40 border border-red-900/60 flex items-start justify-between gap-3 text-xs"
+          >
+            <div className="flex items-start gap-2 text-red-300">
+              <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-red-200">{chatError.title}</p>
+                <p className="text-[11px] text-red-300/90">{chatError.message}</p>
+              </div>
+            </div>
+            {chatError.allowRetry && (
+              <button
+                type="button"
+                onClick={() => setChatError(null)}
+                className="px-2 py-1 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 text-[10px] font-mono border border-red-800"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Chat Input & Submit */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSendChat();
+          }}
+          className="flex items-center gap-2"
+        >
+          <input
+            type="text"
+            data-testid="copilot-chat-input"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            disabled={chatLoading}
+            placeholder="Ask about this incident..."
+            className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            data-testid="copilot-chat-send-btn"
+            disabled={chatLoading || !chatInput.trim()}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white text-xs font-semibold disabled:text-slate-500 disabled:cursor-not-allowed transition"
+          >
+            {chatLoading ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Send className="w-3.5 h-3.5" />
+            )}
+            <span>Send</span>
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

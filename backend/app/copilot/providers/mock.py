@@ -11,6 +11,8 @@ from app.copilot.providers.base import (
 )
 from app.copilot.schemas import (
     CopilotAnalysisPayload,
+    CopilotChatEvidenceItem,
+    CopilotChatPayload,
     EvidenceItem,
     Hypothesis,
     RecentChangeItem,
@@ -35,6 +37,7 @@ class MockCopilotProvider(BaseCopilotProvider):
         simulate_timeout: bool = False,
         simulate_failure: bool = False,
         simulate_malformed: bool = False,
+        custom_chat_payload: Optional[CopilotChatPayload] = None,
     ) -> None:
         super().__init__(model_name=model_name, timeout_seconds=timeout_seconds)
         if simulate_timeout:
@@ -46,6 +49,7 @@ class MockCopilotProvider(BaseCopilotProvider):
         else:
             self.simulated_error = simulated_error
         self.custom_payload = custom_payload
+        self.custom_chat_payload = custom_chat_payload
         self.raw_response_text = raw_response_text
         self.call_count = 0
         self.last_system_prompt: Optional[str] = None
@@ -135,4 +139,38 @@ class MockCopilotProvider(BaseCopilotProvider):
                     how_to_verify="Query connection pool saturation metrics in database monitoring.",
                 )
             ]
+        )
+
+    async def chat(self, system_prompt: str, user_prompt: str) -> CopilotChatPayload:
+        self.call_count += 1
+        self.last_system_prompt = system_prompt
+        self.last_user_prompt = user_prompt
+
+        if self.simulated_error == "timeout":
+            raise CopilotTimeoutError(f"Mock provider call timed out after {self.timeout_seconds}s")
+        elif self.simulated_error == "provider_failure":
+            raise CopilotProviderError("Mock provider experienced upstream service outage")
+        elif self.simulated_error == "malformed_json":
+            raise CopilotResponseParseError("Failed to parse JSON response from LLM: invalid syntax")
+
+        if self.custom_chat_payload is not None:
+            return self.custom_chat_payload
+
+        return CopilotChatPayload(
+            answer="The primary evidence points to release v2.4.0 and related error spikes in webhook processing.",
+            evidence=[
+                CopilotChatEvidenceItem(
+                    source_type="release",
+                    source_id="v2.4.0",
+                    claim="Release v2.4.0 was deployed 15 minutes before error onset",
+                ),
+                CopilotChatEvidenceItem(
+                    source_type="issue",
+                    source_id=1,
+                    claim="Issue #1 occurred 45 times across the incident window",
+                ),
+            ],
+            uncertainties=[
+                "Database connection pool metrics are not visible in telemetry",
+            ],
         )

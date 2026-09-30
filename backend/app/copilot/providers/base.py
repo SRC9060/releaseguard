@@ -3,7 +3,7 @@ Base provider interface and exception hierarchy for AI Copilot.
 """
 
 from abc import ABC, abstractmethod
-from app.copilot.schemas import CopilotAnalysisPayload
+from app.copilot.schemas import CopilotAnalysisPayload, CopilotChatPayload
 
 
 class CopilotProviderError(Exception):
@@ -24,7 +24,8 @@ class CopilotResponseParseError(CopilotProviderError):
 class BaseCopilotProvider(ABC):
     """
     Abstract interface for AI analysis providers.
-    All providers must implement `analyze` returning a validated CopilotAnalysisPayload.
+    All providers must implement `analyze` returning a validated CopilotAnalysisPayload,
+    and `chat` returning a validated CopilotChatPayload.
     """
 
     def __init__(self, model_name: str, timeout_seconds: float = 30.0) -> None:
@@ -42,5 +43,13 @@ class BaseCopilotProvider(ABC):
         """
         Executes an analysis request against the underlying model.
         Returns a validated CopilotAnalysisPayload or raises CopilotProviderError.
+        """
+        pass
+
+    @abstractmethod
+    async def chat(self, system_prompt: str, user_prompt: str) -> CopilotChatPayload:
+        """
+        Executes a conversational inquiry request against the underlying model.
+        Returns a validated CopilotChatPayload or raises CopilotProviderError.
         """
         pass

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import hashlib
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
@@ -253,6 +253,46 @@ class IncidentContextBuilder:
             "</untrusted_incident_data>"
         )
 
+    _context_cache: Dict[int, tuple[Any, Dict[str, Any], str]] = {}
+
+    @classmethod
+    def get_context_cache_key(cls, incident: Incident) -> Any:
+        return (
+            incident.id,
+            incident.updated_at,
+            len(incident.linked_issues) if incident.linked_issues is not None else 0,
+            len(incident.events) if incident.events is not None else 0,
+            len(incident.mitigations) if incident.mitigations is not None else 0,
+        )
+
+    @classmethod
+    def get_or_build_context(cls, incident: Incident, db: Session) -> tuple[Dict[str, Any], str]:
+        """
+        Retrieves cached incident context and hash if incident telemetry is unchanged,
+        or rebuilds the context if telemetry or incident state has updated.
+        Conversation messages do not invalidate this cache.
+        """
+        cache_key = cls.get_context_cache_key(incident)
+        if incident.id in cls._context_cache:
+            cached_key, cached_context, cached_hash = cls._context_cache[incident.id]
+            if cached_key == cache_key:
+                return cached_context, cached_hash
+
+        context = cls.build_context(incident, db)
+        context_hash = cls.compute_context_hash(context)
+        cls._context_cache[incident.id] = (cache_key, context, context_hash)
+        return context, context_hash
+
+    @classmethod
+    def clear_context_cache(cls, incident_id: Optional[int] = None) -> None:
+        """Clears cached context for a specific incident or all incidents."""
+        if incident_id is not None:
+            cls._context_cache.pop(incident_id, None)
+        else:
+            cls._context_cache.clear()
+
 
 compute_context_hash = IncidentContextBuilder.compute_context_hash
 format_untrusted_data_envelope = IncidentContextBuilder.format_untrusted_data_envelope
+get_or_build_context = IncidentContextBuilder.get_or_build_context
+clear_context_cache = IncidentContextBuilder.clear_context_cache

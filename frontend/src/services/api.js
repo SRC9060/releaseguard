@@ -414,6 +414,18 @@ export const api = {
     request(
       `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/copilot/latest`
     ),
+  getIncidentCopilotChat: (tenantId, projectId, incidentId, limit = 50) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/copilot/chat?limit=${limit}`
+    ),
+  sendIncidentCopilotChat: (tenantId, projectId, incidentId, message) =>
+    request(
+      `/api/v1/tenants/${tenantId}/projects/${projectId}/incidents/${incidentId}/copilot/chat`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ message }),
+      }
+    ),
 
   // Legacy fallback routes (for unauthenticated prototype tests)
   getProjects: () => request('/api/v1/projects'),

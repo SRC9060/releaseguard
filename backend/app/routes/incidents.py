@@ -22,6 +22,9 @@ from app.auth import get_current_user
 from app.copilot import (
     CopilotAnalysisRequest,
     CopilotAnalysisResponse,
+    CopilotChatMessageResponse,
+    CopilotChatRequest,
+    CopilotChatResponse,
     CopilotProviderError,
     CopilotResponseParseError,
     CopilotService,
@@ -1061,3 +1064,98 @@ def get_latest_copilot_analysis(
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No AI Copilot analysis found for this incident")
     return result
+
+
+# =========================================================================
+# Phase 15C: Conversational AI Incident Copilot Chat Endpoints
+# =========================================================================
+
+@router.post("/{incident_id}/copilot/chat", response_model=CopilotChatResponse)
+async def chat_with_incident_copilot(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    payload: CopilotChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Submits a user inquiry to the Conversational Incident Copilot.
+    - Tenant and project scoped (strictly authorized, min_role="member").
+    - Only answers questions using authorized ReleaseGuard incident context.
+    - Cannot execute or perform autonomous mutations.
+    - Bounds chat history and enforces prompt-injection boundaries.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    try:
+        response = await CopilotService.chat_incident(
+            incident=incident,
+            user_message=payload.message,
+            user_id=current_user.id,
+            db=db,
+        )
+        return response
+    except CopilotTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"AI Copilot provider timed out: {exc}",
+        )
+    except CopilotResponseParseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI Copilot provider returned invalid structured response: {exc}",
+        )
+    except CopilotProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"AI Copilot provider unavailable: {exc}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected error during AI Copilot chat",
+        )
+
+
+@router.get("/{incident_id}/copilot/chat", response_model=list[CopilotChatMessageResponse])
+def get_incident_copilot_chat_history(
+    tenant_id: int,
+    project_id: int,
+    incident_id: int,
+    limit: int = Query(50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieves recent conversation history for an incident.
+    - Tenant and project scoped (strictly authorized, min_role="member").
+    - Bounded history with pagination support.
+    """
+    _, project = get_tenant_project_or_404(tenant_id, project_id, current_user, db, min_role="member")
+
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.id == incident_id,
+            Incident.project_id == project.id,
+            Incident.tenant_id == tenant_id,
+        )
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Incident not found")
+
+    return CopilotService.get_chat_history(incident_id=incident.id, db=db, limit=limit)
