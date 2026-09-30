@@ -10,16 +10,16 @@ import {
   Database,
   HelpCircle,
   Layers,
-  ArrowRight,
-  ExternalLink,
   Bot,
   Zap,
   Send,
   MessageSquare,
   User,
   AlertCircle,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import api, { ApiError } from '../services/api';
+import api from '../services/api';
 import { formatExactTimestamp, formatRelativeTime } from '../utils/formatters';
 import {
   COPILOT_ADVISORY_NOTICE,
@@ -27,6 +27,10 @@ import {
   COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE,
   getCopilotErrorState,
   formatEvidenceBadge,
+  formatModelBadge,
+  getStoredSectionStates,
+  setStoredSectionStates,
+  DEFAULT_COPILOT_SECTION_STATES,
 } from '../utils/copilot';
 
 const SUGGESTED_QUESTIONS = [
@@ -41,8 +45,15 @@ const SUGGESTED_QUESTIONS = [
 ];
 
 /**
- * Phase 15B & 15C — AI Incident Copilot Section
+ * Phase 16 — AI Incident Copilot Section
  * Provides evidence-grounded, advisory root-cause analysis and conversational investigation.
+ * Information Architecture:
+ * - Summary: compact visible section
+ * - Root-Cause Hypotheses: H1/H2 with ID, title, likelihood, short explanation, and expandable details
+ * - Evidence: collapsed by default
+ * - Recommended Actions: compact cards
+ * - Uncertainties: collapsed by default
+ * - Ask Copilot: compact chat with bounded scroll container
  * Strictly separates observed evidence from AI inferences.
  * Does not perform autonomous actions or feature-flag modifications.
  */
@@ -51,6 +62,29 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [errorState, setErrorState] = useState(null);
+
+  // Section expand/collapse state persisted in sessionStorage
+  const [sectionStates, setSectionStates] = useState(() =>
+    getStoredSectionStates(incidentId, DEFAULT_COPILOT_SECTION_STATES)
+  );
+
+  // Expanded states for individual hypothesis details (Evidence vs Inference)
+  const [expandedHypotheses, setExpandedHypotheses] = useState({});
+
+  const toggleSection = (key) => {
+    setSectionStates((prev) => {
+      const updated = { ...prev, [key]: !prev[key] };
+      setStoredSectionStates(incidentId, updated);
+      return updated;
+    });
+  };
+
+  const toggleHypothesis = (id) => {
+    setExpandedHypotheses((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
+  };
 
   // Conversational Chat State (Phase 15C)
   const [chatMessages, setChatMessages] = useState([]);
@@ -68,11 +102,9 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
       const data = await api.getLatestIncidentCopilot(tenantId, projectId, incidentId);
       setAnalysisRecord(data);
     } catch (err) {
-      // 404 indicates no analysis has been generated yet for this incident
       if (err.status === 404) {
         setAnalysisRecord(null);
       } else {
-        // Handle unexpected error during initial load
         setErrorState({
           status: err.status,
           title: 'Unable to Load Previous Analysis',
@@ -172,12 +204,12 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
   return (
     <div
       data-testid="copilot-section"
-      className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-5"
+      className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4"
     >
       {/* Header & Main Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
         <div className="space-y-1">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="p-1 rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
               <Sparkles className="w-4 h-4" />
             </span>
@@ -187,7 +219,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
                 data-testid="copilot-provider-badge"
                 className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-indigo-300 border border-slate-700"
               >
-                {analysisRecord.provider} · {analysisRecord.model}
+                {analysisRecord.provider} · {formatModelBadge(analysisRecord.model)}
               </span>
             )}
             {analysisRecord?.cached && (
@@ -201,7 +233,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
             )}
           </div>
           <p className="text-xs text-slate-400">
-            Evidence-based incident analysis & root-cause candidate evaluation.
+            Evidence-grounded root-cause analysis & conversational investigation.
           </p>
         </div>
 
@@ -268,15 +300,15 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
       {loading && (
         <div
           data-testid="copilot-loading-state"
-          className="py-10 px-4 bg-slate-800/40 border border-slate-800 rounded-xl flex flex-col items-center justify-center text-center space-y-3 animate-pulse"
+          className="py-8 px-4 bg-slate-800/40 border border-slate-800 rounded-xl flex flex-col items-center justify-center text-center space-y-3 animate-pulse"
         >
           <div className="w-8 h-8 rounded-full bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
             <RefreshCw className="w-4 h-4 animate-spin" />
           </div>
           <div className="space-y-1">
-            <h3 className="text-sm font-semibold text-slate-200">Analyzing incident context...</h3>
+            <h3 className="text-sm font-semibold text-slate-200">Analyzing incident telemetry...</h3>
             <p className="text-xs text-slate-400 max-w-md">
-              Aggregating linked error events, stack traces, recent releases, feature flag mutations, and activity timeline...
+              Correlating error events, stack traces, recent deployments, and feature-flag updates...
             </p>
           </div>
         </div>
@@ -340,67 +372,86 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
 
       {/* State: Structured Analysis Display */}
       {payload && !loading && (
-        <div data-testid="copilot-analysis-content" className="space-y-6">
-          {/* SECTION A: INCIDENT SUMMARY */}
+        <div data-testid="copilot-analysis-content" className="space-y-4">
+          {/* SECTION A: INCIDENT SUMMARY (Compact visible section) */}
           {payload.summary && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                Executive Summary
-              </h3>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                  Executive Summary
+                </h3>
+              </div>
               <div
                 data-testid="copilot-summary"
-                className="p-4 bg-slate-800/50 border border-slate-700/70 rounded-xl text-xs text-slate-200 leading-relaxed"
+                className="p-3.5 bg-slate-800/50 border border-slate-700/70 rounded-lg text-xs text-slate-200 leading-relaxed"
               >
                 {payload.summary}
               </div>
             </div>
           )}
 
-          {/* SECTION B: RECENT CHANGES */}
+          {/* SECTION B: RECENT SYSTEM CHANGES (Compact cards) */}
           {payload.recent_changes && payload.recent_changes.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                Recent System Changes ({payload.recent_changes.length})
-              </h3>
-              <div className="space-y-2">
-                {payload.recent_changes.map((change, idx) => (
-                  <div
-                    key={idx}
-                    data-testid="copilot-recent-change-item"
-                    className="p-3 bg-slate-800/40 border border-slate-700/60 rounded-lg text-xs space-y-1.5"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium uppercase bg-slate-700 text-slate-300 border border-slate-600">
-                          {change.type}
-                        </span>
-                        <span className="font-semibold text-slate-100 font-mono">
-                          {change.identifier}
-                        </span>
+              <button
+                type="button"
+                onClick={() => toggleSection('recent_changes')}
+                aria-expanded={sectionStates.recent_changes !== false}
+                className="w-full flex items-center justify-between text-left group cursor-pointer"
+              >
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  Recent System Changes ({payload.recent_changes.length})
+                </h3>
+                <span className="text-xs text-slate-500 group-hover:text-slate-300 transition flex items-center gap-1">
+                  {sectionStates.recent_changes !== false ? (
+                    <>Hide <ChevronUp className="w-3.5 h-3.5" /></>
+                  ) : (
+                    <>Show <ChevronDown className="w-3.5 h-3.5" /></>
+                  )}
+                </span>
+              </button>
+
+              {sectionStates.recent_changes !== false && (
+                <div className="space-y-2">
+                  {payload.recent_changes.map((change, idx) => (
+                    <div
+                      key={idx}
+                      data-testid="copilot-recent-change-item"
+                      className="p-3 bg-slate-800/40 border border-slate-700/60 rounded-lg text-xs space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-medium uppercase bg-slate-700 text-slate-300 border border-slate-600">
+                            {change.type}
+                          </span>
+                          <span className="font-semibold text-slate-100 font-mono">
+                            {change.identifier}
+                          </span>
+                        </div>
+                        {change.timestamp && (
+                          <span className="text-[11px] text-slate-500 font-mono">
+                            {formatRelativeTime(change.timestamp)}
+                          </span>
+                        )}
                       </div>
-                      {change.timestamp && (
-                        <span className="text-[11px] text-slate-500 font-mono">
-                          {formatRelativeTime(change.timestamp)}
-                        </span>
+                      <p className="text-slate-300 text-xs">{change.description}</p>
+                      {change.potential_relevance && (
+                        <p className="text-[11px] text-slate-400 italic">
+                          Relevance: {change.potential_relevance}
+                        </p>
                       )}
                     </div>
-                    <p className="text-slate-300 text-xs">{change.description}</p>
-                    {change.potential_relevance && (
-                      <p className="text-[11px] text-slate-400 italic">
-                        Relevance: {change.potential_relevance}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* SECTION C: ROOT-CAUSE HYPOTHESES (EVIDENCE VS INFERENCE SEPARATION) */}
+          {/* SECTION C: ROOT-CAUSE HYPOTHESES (H1/H2 with ID, title, likelihood, short explanation, expandable detail) */}
           {payload.hypotheses && payload.hypotheses.length > 0 && (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <HelpCircle className="w-3.5 h-3.5 text-rose-400" />
@@ -411,265 +462,339 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
                 </span>
               </div>
 
-              <div className="space-y-3">
-                {payload.hypotheses.map((hyp) => (
-                  <div
-                    key={hyp.id || hyp.title}
-                    data-testid="copilot-hypothesis-item"
-                    className="p-4 bg-slate-800/50 border border-slate-700 rounded-xl space-y-3"
-                  >
-                    {/* Hypothesis Title & Likelihood */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-1.5 py-0.5 rounded text-[11px] font-bold font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                          {hyp.id}
+              <div className="space-y-2.5">
+                {payload.hypotheses.map((hyp) => {
+                  const hypKey = hyp.id || hyp.title;
+                  const isDetailsExpanded = !!expandedHypotheses[hypKey];
+
+                  return (
+                    <div
+                      key={hypKey}
+                      data-testid="copilot-hypothesis-item"
+                      className="p-3.5 bg-slate-800/40 border border-slate-700 rounded-lg space-y-2.5 transition-all"
+                    >
+                      {/* Hypothesis Title & Likelihood */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded text-[11px] font-bold font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            {hyp.id}
+                          </span>
+                          <h4 className="font-bold text-slate-100 text-xs tracking-tight">{hyp.title}</h4>
+                        </div>
+                        <span
+                          data-testid="hypothesis-likelihood-badge"
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border self-start sm:self-center ${
+                            hyp.likelihood === 'probable'
+                              ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                              : hyp.likelihood === 'plausible'
+                              ? 'bg-blue-500/10 text-blue-300 border-blue-500/30'
+                              : 'bg-slate-700/60 text-slate-400 border-slate-600'
+                          }`}
+                        >
+                          Likelihood: {hyp.likelihood}
                         </span>
-                        <h4 className="font-bold text-slate-100 text-sm">{hyp.title}</h4>
                       </div>
-                      <span
-                        data-testid="hypothesis-likelihood-badge"
-                        className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border self-start sm:self-center ${
-                          hyp.likelihood === 'probable'
-                            ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                            : hyp.likelihood === 'plausible'
-                            ? 'bg-blue-500/10 text-blue-300 border-blue-500/30'
-                            : 'bg-slate-700/60 text-slate-400 border-slate-600'
-                        }`}
-                      >
-                        Likelihood: {hyp.likelihood}
-                      </span>
-                    </div>
 
-                    {/* Hypothesis Explanation */}
-                    {hyp.explanation && (
-                      <p className="text-xs text-slate-300 leading-relaxed">{hyp.explanation}</p>
-                    )}
+                      {/* Hypothesis Explanation */}
+                      {hyp.explanation && (
+                        <p className="text-xs text-slate-300 leading-relaxed">{hyp.explanation}</p>
+                      )}
 
-                    {/* Dual Box: OBSERVED EVIDENCE vs AI INFERENCE */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-                      {/* Left: Observed Evidence */}
-                      <div
-                        data-testid="hypothesis-evidence-box"
-                        className="p-3 bg-emerald-950/15 border border-emerald-800/40 rounded-lg space-y-1.5"
-                      >
-                        <div className="flex items-center gap-1.5 text-emerald-400 text-[11px] font-bold uppercase tracking-wider">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          Observed Evidence (Telemetry Facts)
+                      {/* Expandable Evidence & Inference Detail Toggle */}
+                      <div className="pt-1 flex items-center justify-between">
+                        <button
+                          type="button"
+                          onClick={() => toggleHypothesis(hypKey)}
+                          aria-expanded={isDetailsExpanded}
+                          className="text-[11px] font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer transition"
+                        >
+                          {isDetailsExpanded ? (
+                            <>
+                              Hide Evidence & Inference Detail
+                              <ChevronUp className="w-3 h-3" />
+                            </>
+                          ) : (
+                            <>
+                              View Observed Evidence & Inference Detail
+                              <ChevronDown className="w-3 h-3" />
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Dual Box: OBSERVED EVIDENCE vs AI INFERENCE (Distinct styling) */}
+                      {isDetailsExpanded && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pt-1.5 border-t border-slate-700/50">
+                          {/* Left: Observed Evidence */}
+                          <div
+                            data-testid="hypothesis-evidence-box"
+                            className="p-2.5 bg-emerald-950/20 border border-emerald-800/40 rounded-lg space-y-1.5"
+                          >
+                            <div className="flex items-center gap-1.5 text-emerald-400 text-[10px] font-bold uppercase tracking-wider">
+                              <CheckCircle2 className="w-3 h-3" />
+                              Observed Evidence (Telemetry Facts)
+                            </div>
+                            {Array.isArray(hyp.evidence) && hyp.evidence.length > 0 ? (
+                              <ul className="space-y-1 text-xs text-slate-200 list-disc list-inside">
+                                {hyp.evidence.map((ev, eIdx) => (
+                                  <li key={eIdx} className="leading-snug">
+                                    {ev}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="text-xs text-slate-500 italic">No direct evidence points cited.</p>
+                            )}
+                          </div>
+
+                          {/* Right: AI Inference */}
+                          <div
+                            data-testid="hypothesis-inference-box"
+                            className="p-2.5 bg-purple-950/20 border border-purple-800/40 rounded-lg space-y-1.5"
+                          >
+                            <div className="flex items-center gap-1.5 text-purple-400 text-[10px] font-bold uppercase tracking-wider">
+                              <Bot className="w-3 h-3" />
+                              AI Inference (Reasoned Deduction)
+                            </div>
+                            {Array.isArray(hyp.inference) && hyp.inference.length > 0 ? (
+                              <ul className="space-y-1 text-xs text-slate-200 list-disc list-inside">
+                                {hyp.inference.map((inf, iIdx) => (
+                                  <li key={iIdx} className="leading-snug">
+                                    {inf}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : typeof hyp.inference === 'string' ? (
+                              <p className="text-xs text-slate-200">{hyp.inference}</p>
+                            ) : (
+                              <p className="text-xs text-slate-500 italic">No inferences provided.</p>
+                            )}
+                          </div>
                         </div>
-                        {Array.isArray(hyp.evidence) && hyp.evidence.length > 0 ? (
-                          <ul className="space-y-1 text-xs text-slate-200 list-disc list-inside">
-                            {hyp.evidence.map((ev, eIdx) => (
-                              <li key={eIdx} className="leading-snug">
-                                {ev}
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <p className="text-xs text-slate-500 italic">No direct evidence points cited.</p>
-                        )}
-                      </div>
-
-                      {/* Right: AI Inference */}
-                      <div
-                        data-testid="hypothesis-inference-box"
-                        className="p-3 bg-purple-950/15 border border-purple-800/40 rounded-lg space-y-1.5"
-                      >
-                        <div className="flex items-center gap-1.5 text-purple-400 text-[11px] font-bold uppercase tracking-wider">
-                          <Bot className="w-3.5 h-3.5" />
-                          AI Inference (Reasoned Deduction)
-                        </div>
-                        {Array.isArray(hyp.inference) && hyp.inference.length > 0 ? (
-                          <ul className="space-y-1 text-xs text-slate-200 list-disc list-inside">
-                            {hyp.inference.map((inf, iIdx) => (
-                              <li key={iIdx} className="leading-snug">
-                                {inf}
-                              </li>
-                            ))}
-                          </ul>
-                        ) : typeof hyp.inference === 'string' ? (
-                          <p className="text-xs text-slate-200">{hyp.inference}</p>
-                        ) : (
-                          <p className="text-xs text-slate-500 italic">No inferences provided.</p>
-                        )}
-                      </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {/* SECTION D: RECOMMENDED ACTIONS */}
+          {/* SECTION D: RECOMMENDED ACTIONS (Compact cards) */}
           {payload.recommended_actions && payload.recommended_actions.length > 0 && (
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => toggleSection('actions')}
+                aria-expanded={sectionStates.actions !== false}
+                className="w-full flex items-center justify-between text-left group cursor-pointer"
+              >
                 <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
                   Recommended Next Steps ({payload.recommended_actions.length})
                 </h3>
-                <span className="text-[11px] text-slate-500 italic">
-                  Advisory suggestions for operator review
+                <span className="text-xs text-slate-500 group-hover:text-slate-300 transition flex items-center gap-1">
+                  {sectionStates.actions !== false ? (
+                    <>Hide <ChevronUp className="w-3.5 h-3.5" /></>
+                  ) : (
+                    <>Show <ChevronDown className="w-3.5 h-3.5" /></>
+                  )}
                 </span>
-              </div>
+              </button>
 
-              <div className="space-y-2.5">
-                {payload.recommended_actions.map((act, idx) => (
-                  <div
-                    key={idx}
-                    data-testid="copilot-recommended-action-item"
-                    className="p-3.5 bg-slate-800/50 border border-slate-700 rounded-lg space-y-2 text-xs"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${
-                            act.priority === 'immediate'
-                              ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-                              : act.priority === 'secondary'
-                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                              : 'bg-slate-700 text-slate-300 border-slate-600'
-                          }`}
-                        >
-                          {act.priority}
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-800 text-slate-300 border border-slate-700">
-                          {act.action_type}
-                        </span>
-                        {act.target_flag_key && (
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
-                            Flag: {act.target_flag_key}
+              {sectionStates.actions !== false && (
+                <div className="space-y-2">
+                  {payload.recommended_actions.map((act, idx) => (
+                    <div
+                      key={idx}
+                      data-testid="copilot-recommended-action-item"
+                      className="p-3 bg-slate-800/40 border border-slate-700/70 rounded-lg space-y-1.5 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${
+                              act.priority === 'immediate'
+                                ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                                : act.priority === 'secondary'
+                                ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                : 'bg-slate-700 text-slate-300 border-slate-600'
+                            }`}
+                          >
+                            {act.priority}
+                          </span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-800 text-slate-300 border border-slate-700">
+                            {act.action_type}
+                          </span>
+                          {act.target_flag_key && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                              Flag: {act.target_flag_key}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <p className="text-slate-100 font-semibold">{act.description}</p>
+
+                      {act.rationale && (
+                        <p className="text-slate-300 text-xs">
+                          <strong className="text-slate-400 font-medium">Rationale:</strong>{' '}
+                          {act.rationale}
+                        </p>
+                      )}
+
+                      {act.risk_assessment && (
+                        <p className="text-[11px] text-slate-400 italic">
+                          Risk Assessment: {act.risk_assessment}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SECTION E: GROUNDED EVIDENCE (Collapsed by default as requested) */}
+          {payload.evidence && payload.evidence.length > 0 && (
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => toggleSection('evidence')}
+                aria-expanded={!!sectionStates.evidence}
+                className="w-full flex items-center justify-between text-left group cursor-pointer"
+              >
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5 text-cyan-400" />
+                  Telemetry Evidence Points ({payload.evidence.length})
+                </h3>
+                <span className="text-xs text-slate-500 group-hover:text-slate-300 transition flex items-center gap-1">
+                  {sectionStates.evidence ? (
+                    <>Hide <ChevronUp className="w-3.5 h-3.5" /></>
+                  ) : (
+                    <>Show <ChevronDown className="w-3.5 h-3.5" /></>
+                  )}
+                </span>
+              </button>
+
+              {sectionStates.evidence && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+                  {payload.evidence.map((ev, idx) => (
+                    <div
+                      key={idx}
+                      data-testid="copilot-evidence-item"
+                      className="p-2.5 bg-slate-800/40 border border-slate-700/60 rounded-lg text-xs space-y-1"
+                    >
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-mono text-cyan-400 font-medium">{ev.source}</span>
+                        {ev.confidence && (
+                          <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-slate-700 text-slate-300">
+                            {ev.confidence} confidence
                           </span>
                         )}
                       </div>
+                      <p className="text-slate-200">{ev.description}</p>
                     </div>
-
-                    <p className="text-slate-100 font-semibold">{act.description}</p>
-
-                    {act.rationale && (
-                      <p className="text-slate-300 text-xs">
-                        <strong className="text-slate-400 font-medium">Rationale:</strong>{' '}
-                        {act.rationale}
-                      </p>
-                    )}
-
-                    {act.risk_assessment && (
-                      <p className="text-[11px] text-slate-400 italic">
-                        Risk Assessment: {act.risk_assessment}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {/* SECTION E: GROUNDED EVIDENCE */}
-          {payload.evidence && payload.evidence.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Database className="w-3.5 h-3.5 text-cyan-400" />
-                Telemetry Evidence Points ({payload.evidence.length})
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {payload.evidence.map((ev, idx) => (
-                  <div
-                    key={idx}
-                    data-testid="copilot-evidence-item"
-                    className="p-3 bg-slate-800/40 border border-slate-700/60 rounded-lg text-xs space-y-1"
-                  >
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-mono text-cyan-400 font-medium">{ev.source}</span>
-                      {ev.confidence && (
-                        <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-slate-700 text-slate-300">
-                          {ev.confidence} confidence
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-slate-200">{ev.description}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* SECTION F: UNCERTAINTIES & MISSING INFORMATION */}
+          {/* SECTION F: UNCERTAINTIES & MISSING INFORMATION (Collapsed by default as requested) */}
           {payload.uncertainties && payload.uncertainties.length > 0 && (
             <div className="space-y-2">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Search className="w-3.5 h-3.5 text-amber-400" />
-                Uncertainties & Telemetry Gaps ({payload.uncertainties.length})
-              </h3>
-              <div className="space-y-2">
-                {payload.uncertainties.map((unc, idx) => (
-                  <div
-                    key={idx}
-                    data-testid="copilot-uncertainty-item"
-                    className="p-3 bg-amber-950/10 border border-amber-900/30 rounded-lg text-xs space-y-1"
-                  >
-                    <div className="font-semibold text-amber-300 font-mono text-[11px]">
-                      Area: {unc.area}
+              <button
+                type="button"
+                onClick={() => toggleSection('uncertainties')}
+                aria-expanded={!!sectionStates.uncertainties}
+                className="w-full flex items-center justify-between text-left group cursor-pointer"
+              >
+                <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Search className="w-3.5 h-3.5 text-amber-400" />
+                  Uncertainties & Telemetry Gaps ({payload.uncertainties.length})
+                </h3>
+                <span className="text-xs text-slate-500 group-hover:text-slate-300 transition flex items-center gap-1">
+                  {sectionStates.uncertainties ? (
+                    <>Hide <ChevronUp className="w-3.5 h-3.5" /></>
+                  ) : (
+                    <>Show <ChevronDown className="w-3.5 h-3.5" /></>
+                  )}
+                </span>
+              </button>
+
+              {sectionStates.uncertainties && (
+                <div className="space-y-2 pt-1">
+                  {payload.uncertainties.map((unc, idx) => (
+                    <div
+                      key={idx}
+                      data-testid="copilot-uncertainty-item"
+                      className="p-2.5 bg-amber-950/10 border border-amber-900/30 rounded-lg text-xs space-y-1"
+                    >
+                      <div className="font-semibold text-amber-300 font-mono text-[11px]">
+                        Area: {unc.area}
+                      </div>
+                      <p className="text-slate-200">{unc.missing_information}</p>
+                      {unc.how_to_verify && (
+                        <p className="text-[11px] text-slate-400">
+                          <strong className="text-slate-300 font-medium">Verification step:</strong>{' '}
+                          {unc.how_to_verify}
+                        </p>
+                      )}
                     </div>
-                    <p className="text-slate-200">{unc.missing_information}</p>
-                    {unc.how_to_verify && (
-                      <p className="text-[11px] text-slate-400">
-                        <strong className="text-slate-300 font-medium">Verification step:</strong>{' '}
-                        {unc.how_to_verify}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
       {/* ============================================================ */}
-      {/* PHASE 15C: CONVERSATIONAL INVESTIGATION CHAT SECTION          */}
+      {/* PHASE 15C & 16: CONVERSATIONAL INVESTIGATION CHAT SECTION    */}
       {/* ============================================================ */}
       <div
         data-testid="copilot-chat-section"
-        className="mt-6 pt-5 border-t border-slate-800 space-y-4"
+        className="mt-5 pt-4 border-t border-slate-800 space-y-3"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="space-y-0.5">
             <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-              <MessageSquare className="w-4 h-4 text-indigo-400" />
+              <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
               Ask Copilot about this incident
             </h3>
             <p className="text-[11px] text-slate-400">
               Conversational inquiry strictly grounded in authorized incident telemetry and timeline.
             </p>
           </div>
-          <div className="flex items-center gap-1.5 text-[11px] text-amber-400/90 font-mono bg-amber-500/10 px-2.5 py-1 rounded-md border border-amber-500/20">
-            <Shield className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+          <div className="flex items-center gap-1.5 text-[10px] text-amber-400/90 font-mono bg-amber-500/10 px-2.5 py-1 rounded-md border border-amber-500/20">
+            <Shield className="w-3 h-3 text-amber-400 flex-shrink-0" />
             <span>{COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE}</span>
           </div>
         </div>
 
-        {/* Suggested Question Prompt Pills */}
-        <div className="flex flex-wrap gap-1.5 pt-1">
+        {/* Suggested Question Prompt Pills (Compact & Wrapping naturally) */}
+        <div className="flex flex-wrap gap-1.5 pt-0.5">
           {SUGGESTED_QUESTIONS.map((q, idx) => (
             <button
               key={idx}
               type="button"
               disabled={chatLoading}
               onClick={() => handleSendChat(q)}
-              className="text-[11px] px-2.5 py-1 rounded-full bg-slate-800/80 hover:bg-slate-700/80 text-slate-300 hover:text-slate-100 border border-slate-700/60 transition disabled:opacity-50 text-left"
+              className="text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700/60 transition disabled:opacity-50 text-left cursor-pointer"
             >
               {q}
             </button>
           ))}
         </div>
 
-        {/* Chat Messages Container */}
+        {/* Chat Messages Container (Bounded fixed max-height) */}
         <div
           data-testid="copilot-chat-messages"
-          className="p-4 bg-slate-950/60 border border-slate-800 rounded-lg max-h-96 overflow-y-auto space-y-3"
+          className="p-3.5 bg-slate-950/60 border border-slate-800 rounded-lg max-h-80 overflow-y-auto space-y-3"
         >
           {chatMessages.length === 0 ? (
             <div className="py-6 text-center text-xs text-slate-500 space-y-1">
-              <Bot className="w-6 h-6 mx-auto text-slate-600 mb-1" />
+              <Bot className="w-5 h-5 mx-auto text-slate-600 mb-1" />
               <p>No conversation yet for this incident.</p>
               <p className="text-[11px] text-slate-600">
                 Ask any question about root causes, telemetry evidence, or recent releases.
@@ -680,7 +805,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
               <div
                 key={msg.id || idx}
                 data-testid={`copilot-chat-message-${msg.role}`}
-                className={`flex gap-3 text-xs ${
+                className={`flex gap-2.5 text-xs ${
                   msg.role === 'user' ? 'justify-end' : 'justify-start'
                 }`}
               >
@@ -690,7 +815,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
                   </div>
                 )}
                 <div
-                  className={`max-w-[85%] rounded-lg p-3 space-y-2 ${
+                  className={`max-w-[85%] rounded-lg p-3 space-y-1.5 ${
                     msg.role === 'user'
                       ? 'bg-indigo-600/30 text-indigo-100 border border-indigo-500/40'
                       : 'bg-slate-800/90 text-slate-200 border border-slate-700'
@@ -698,20 +823,20 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
                 >
                   <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 font-mono">
                     <span className="font-semibold uppercase tracking-wider text-slate-300">
-                      {msg.role === 'user' ? 'Operator' : `Copilot (${msg.model || 'AI'})`}
+                      {msg.role === 'user' ? 'Operator' : `Copilot (${formatModelBadge(msg.model) || 'AI'})`}
                     </span>
                     {msg.created_at && (
                       <span>{formatRelativeTime(msg.created_at)}</span>
                     )}
                   </div>
 
-                  <p className="whitespace-pre-wrap leading-relaxed text-slate-100">
+                  <p className="whitespace-pre-wrap leading-relaxed text-slate-100 text-xs">
                     {msg.answer || msg.content}
                   </p>
 
                   {/* Evidence Citations */}
                   {msg.evidence && msg.evidence.length > 0 && (
-                    <div className="pt-2 border-t border-slate-700/60 space-y-1">
+                    <div className="pt-1.5 border-t border-slate-700/60 space-y-1">
                       <div className="text-[10px] uppercase font-mono text-cyan-400 font-semibold tracking-wider flex items-center gap-1">
                         <Database className="w-3 h-3 text-cyan-400" />
                         Evidence Citations ({msg.evidence.length})
@@ -764,7 +889,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
         {chatError && (
           <div
             data-testid="copilot-chat-error"
-            className="p-3 rounded-lg bg-red-950/40 border border-red-900/60 flex items-start justify-between gap-3 text-xs"
+            className="p-2.5 rounded-lg bg-red-950/40 border border-red-900/60 flex items-start justify-between gap-3 text-xs"
           >
             <div className="flex items-start gap-2 text-red-300">
               <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
@@ -777,7 +902,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
               <button
                 type="button"
                 onClick={() => setChatError(null)}
-                className="px-2 py-1 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 text-[10px] font-mono border border-red-800"
+                className="px-2 py-1 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 text-[10px] font-mono border border-red-800 cursor-pointer"
               >
                 Dismiss
               </button>
@@ -785,7 +910,7 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
           </div>
         )}
 
-        {/* Chat Input & Submit */}
+        {/* Chat Input & Submit (Always visible at bottom) */}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -799,14 +924,16 @@ export default function IncidentCopilotSection({ tenantId, projectId, incidentId
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             disabled={chatLoading}
-            placeholder="Ask about this incident..."
-            className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+            placeholder="Ask about root causes, evidence citations, or mitigation..."
+            aria-label="Ask Copilot about this incident"
+            className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
           />
           <button
             type="submit"
             data-testid="copilot-chat-send-btn"
             disabled={chatLoading || !chatInput.trim()}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white text-xs font-semibold disabled:text-slate-500 disabled:cursor-not-allowed transition"
+            aria-label="Send Copilot question"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white text-xs font-semibold disabled:text-slate-500 disabled:cursor-not-allowed transition cursor-pointer"
           >
             {chatLoading ? (
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />

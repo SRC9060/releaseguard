@@ -7,25 +7,22 @@ import {
   Flame,
   ArrowLeft,
   AlertTriangle,
-  CheckCircle2,
   Clock,
-  ShieldAlert,
-  Sliders,
-  Tag,
+  ShieldCheck,
   AlertOctagon,
   RefreshCw,
   Send,
-  UserCheck,
-  Check,
-  ChevronRight,
-  ShieldCheck,
-  ZapOff,
+  CheckCircle,
+  Eye,
   Link2,
   Unlink,
   Plus,
   RotateCcw,
-  CheckCircle,
-  Eye,
+  ZapOff,
+  ChevronDown,
+  ChevronUp,
+  Activity,
+  Layers,
 } from 'lucide-react';
 import { formatRelativeTime, formatExactTimestamp } from '../utils/formatters';
 import IncidentCopilotSection from '../components/IncidentCopilotSection';
@@ -46,7 +43,7 @@ function formatDuration(startedAt, resolvedAt) {
 export default function IncidentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { selectedTenant, user: currentUser } = useAuth();
+  const { selectedTenant } = useAuth();
   const { selectedProject: currentProject } = useProject();
 
   const userRole = selectedTenant?.role || 'member';
@@ -61,7 +58,6 @@ export default function IncidentDetailPage() {
   const [statusFeedback, setStatusFeedback] = useState(null);
 
   // Severity Edit State
-  const [isEditingSeverity, setIsEditingSeverity] = useState(false);
   const [selectedSeverity, setSelectedSeverity] = useState('');
 
   // Link Issue Modal State
@@ -74,7 +70,6 @@ export default function IncidentDetailPage() {
   // Apply Mitigation Modal State
   const [showMitigationModal, setShowMitigationModal] = useState(false);
   const [projectFlags, setProjectFlags] = useState([]);
-  const [environments, setEnvironments] = useState([]);
   const [selectedFlagId, setSelectedFlagId] = useState('');
   const [selectedEnvId, setSelectedEnvId] = useState('');
   const [mitigationReason, setMitigationReason] = useState('');
@@ -90,11 +85,15 @@ export default function IncidentDetailPage() {
   const [showApprovalModal, setShowApprovalModal] = useState(false);
   const [isApproving, setIsApproving] = useState(false);
   const [approvalError, setApprovalError] = useState(null);
-  const [approvalSuccess, setApprovalSuccess] = useState(null);
 
   // Timeline Note State
   const [newNote, setNewNote] = useState('');
   const [isSubmittingNote, setIsSubmittingNote] = useState(false);
+  const [expandedEvents, setExpandedEvents] = useState({});
+
+  const toggleEventDetail = (eventId) => {
+    setExpandedEvents((prev) => ({ ...prev, [eventId]: !prev[eventId] }));
+  };
 
   const fetchIncident = useCallback(async () => {
     if (!selectedTenant || !currentProject || !id) return;
@@ -119,14 +118,12 @@ export default function IncidentDetailPage() {
   const loadProjectResources = async () => {
     if (!selectedTenant || !currentProject) return;
     try {
-      const [issuesData, flagsData, envsData] = await Promise.allSettled([
+      const [issuesData, flagsData] = await Promise.allSettled([
         api.getTenantIssues(selectedTenant.id, currentProject.id),
         api.getFeatureFlags ? api.getFeatureFlags(selectedTenant.id, currentProject.id) : Promise.resolve([]),
-        api.getEnvironments ? api.getEnvironments(selectedTenant.id, currentProject.id) : Promise.resolve([]),
       ]);
       if (issuesData.status === 'fulfilled') setProjectIssues(issuesData.value || []);
       if (flagsData.status === 'fulfilled') setProjectFlags(flagsData.value || []);
-      if (envsData.status === 'fulfilled') setEnvironments(envsData.value || []);
     } catch (e) {
       console.warn('Could not preload project resources for modal', e);
     }
@@ -167,7 +164,6 @@ export default function IncidentDetailPage() {
   const handleSeverityChange = async (e) => {
     const newSev = e.target.value;
     setSelectedSeverity(newSev);
-    setIsEditingSeverity(false);
     if (!selectedTenant || !currentProject || !incident || newSev === incident.severity) return;
     setStatusFeedback(null);
     try {
@@ -300,13 +296,12 @@ export default function IncidentDetailPage() {
     setIsApproving(true);
     setApprovalError(null);
     try {
-      const result = await api.approveMitigation(
+      await api.approveMitigation(
         selectedTenant.id,
         currentProject.id,
         incident.id,
         selectedMitigation.id
       );
-      setApprovalSuccess(result);
       setShowApprovalModal(false);
       fetchIncident();
     } catch (err) {
@@ -375,10 +370,12 @@ export default function IncidentDetailPage() {
   }
 
   const duration = formatDuration(incident.started_at, incident.resolved_at);
+  const totalEventsCount = incident.linked_issues?.reduce((acc, l) => acc + (l.event_count || 0), 0) || 0;
+  const activeMitigationsCount = incident.mitigations?.filter((m) => m.status === 'executed').length || 0;
 
   return (
-    <div className="space-y-6">
-      {/* Top Navigation & Status Bar */}
+    <div className="space-y-5">
+      {/* Top Header & Status Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-800/80 pb-4">
         <div className="flex items-center gap-3">
           <button
@@ -400,6 +397,7 @@ export default function IncidentDetailPage() {
                   <select
                     value={selectedSeverity}
                     onChange={handleSeverityChange}
+                    aria-label="Incident Severity"
                     className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider border font-mono cursor-pointer bg-slate-900 ${getSeverityBadge(
                       incident.severity
                     )}`}
@@ -479,6 +477,7 @@ export default function IncidentDetailPage() {
             onClick={fetchIncident}
             className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition cursor-pointer"
             title="Refresh incident"
+            aria-label="Refresh incident"
           >
             <RefreshCw className="w-4 h-4" />
           </button>
@@ -500,72 +499,81 @@ export default function IncidentDetailPage() {
         </div>
       )}
 
-      {/* Main Grid: Details, Linked Issues, Mitigations, Timeline */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column (2 Cols): Overview, Linked Issues, Mitigation Actions */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* SECTION 1: INCIDENT OVERVIEW */}
-          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
-            <div className="flex items-center gap-2 text-rose-400 text-xs font-bold uppercase tracking-wider">
-              <Flame className="w-4 h-4" />
-              Incident Overview
-            </div>
-            <p className="text-sm text-slate-200">
-              {incident.description || 'No detailed incident description recorded.'}
-            </p>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 text-xs border-t border-slate-800">
-              <div>
-                <span className="text-slate-500 block text-[11px]">Started At</span>
-                <span className="text-slate-300 font-mono text-[11px]">
-                  {formatExactTimestamp(incident.started_at)}
-                </span>
-                <span className="text-[10px] text-slate-500 block">
-                  {formatRelativeTime(incident.started_at)}
-                </span>
-              </div>
-
-              <div>
-                <span className="text-slate-500 block text-[11px]">Resolved At</span>
-                {incident.resolved_at ? (
-                  <>
-                    <span className="text-emerald-400 font-mono text-[11px]">
-                      {formatExactTimestamp(incident.resolved_at)}
-                    </span>
-                    <span className="text-[10px] text-slate-500 block">
-                      {formatRelativeTime(incident.resolved_at)}
-                    </span>
-                  </>
-                ) : (
-                  <span className="text-slate-500 italic">Unresolved</span>
-                )}
-              </div>
-
-              <div>
-                <span className="text-slate-500 block text-[11px]">Environment</span>
-                <span className="text-slate-300 font-mono text-[11px] uppercase">
-                  {incident.environment}
-                </span>
-              </div>
-
-              <div>
-                <span className="text-slate-500 block text-[11px]">Created By</span>
-                <span className="text-slate-300 font-mono text-[11px] truncate block">
-                  {incident.created_by_email || 'System'}
-                </span>
-              </div>
-            </div>
+      {/* COMPACT SUMMARY CARDS / STATUS HIGHLIGHTS */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Card 1: Status & Severity */}
+        <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold tracking-wider block">
+            Status & Severity
+          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`px-2 py-0.5 rounded text-[11px] font-bold font-mono uppercase ${getSeverityBadge(incident.severity)}`}>
+              {incident.severity}
+            </span>
+            <span className={`px-2 py-0.5 rounded text-[11px] font-medium font-mono uppercase ${getStatusBadge(incident.status)}`}>
+              {incident.status}
+            </span>
           </div>
+        </div>
 
-          {/* AI INCIDENT COPILOT */}
-          <IncidentCopilotSection
-            tenantId={selectedTenant?.id}
-            projectId={currentProject?.id}
-            incidentId={incident.id}
-          />
+        {/* Card 2: Environment & Lifetime */}
+        <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold tracking-wider block">
+            Environment & Lifetime
+          </span>
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700 uppercase">
+              {incident.environment}
+            </span>
+            <span className="text-xs text-slate-300 font-mono">
+              {duration || 'Active'}
+            </span>
+          </div>
+        </div>
 
-          {/* SECTION 2: LINKED ISSUES */}
-          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
+        {/* Card 3: Correlated Scope */}
+        <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold tracking-wider block">
+            Scope & Impact
+          </span>
+          <div className="text-xs text-slate-200 font-medium">
+            <span className="font-semibold text-rose-400">{incident.linked_issues?.length || 0}</span> linked issues · <span className="font-semibold text-slate-300">{totalEventsCount}</span> events
+          </div>
+        </div>
+
+        {/* Card 4: Mitigations */}
+        <div className="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-1">
+          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold tracking-wider block">
+            Mitigation State
+          </span>
+          <div className="text-xs text-slate-200">
+            {activeMitigationsCount > 0 ? (
+              <span className="text-emerald-400 font-medium font-mono">
+                {activeMitigationsCount} kill switch active
+              </span>
+            ) : (
+              <span className="text-slate-400 italic">No active mitigation</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Incident Description */}
+      {incident.description && (
+        <div className="p-3.5 bg-slate-900/60 border border-slate-800 rounded-xl text-xs text-slate-300 space-y-1">
+          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold tracking-wider block">
+            Incident Description
+          </span>
+          <p className="leading-relaxed">{incident.description}</p>
+        </div>
+      )}
+
+      {/* INVESTIGATION WORKSPACE: Linked Issues & Mitigations (Left) + Timeline (Right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left Column (2 Cols): Linked Issues & Feature-Flag Mitigations */}
+        <div className="lg:col-span-2 space-y-5">
+          {/* LINKED ISSUES */}
+          <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-rose-400 text-xs font-bold uppercase tracking-wider">
                 <Link2 className="w-4 h-4" />
@@ -593,7 +601,7 @@ export default function IncidentDetailPage() {
                 {incident.linked_issues.map((link) => (
                   <div
                     key={link.id}
-                    className="p-3 bg-slate-800/60 border border-slate-700/80 rounded-lg flex items-center justify-between gap-3 text-xs"
+                    className="p-3 bg-slate-800/50 border border-slate-700/70 rounded-lg flex items-center justify-between gap-3 text-xs"
                   >
                     <div className="space-y-1 min-w-0">
                       <div className="flex items-center gap-2">
@@ -617,7 +625,7 @@ export default function IncidentDetailPage() {
                     <div className="flex items-center gap-2 shrink-0">
                       <Link
                         to={`/issues/${link.issue_id}`}
-                        className="px-2 py-1 bg-slate-700/80 hover:bg-slate-600 text-slate-200 rounded text-xs transition"
+                        className="px-2.5 py-1 bg-slate-700/80 hover:bg-slate-600 text-slate-200 rounded text-xs transition"
                       >
                         View
                       </Link>
@@ -626,6 +634,7 @@ export default function IncidentDetailPage() {
                           onClick={() => handleUnlinkIssue(link.issue_id)}
                           className="p-1 text-slate-400 hover:text-rose-400 transition rounded hover:bg-slate-700 cursor-pointer"
                           title="Unlink Issue"
+                          aria-label={`Unlink Issue ${link.issue_id}`}
                         >
                           <Unlink className="w-3.5 h-3.5" />
                         </button>
@@ -635,18 +644,18 @@ export default function IncidentDetailPage() {
                 ))}
               </div>
             ) : (
-              <div className="p-4 bg-slate-800/40 rounded-lg text-center text-xs text-slate-500 italic">
+              <div className="p-3 bg-slate-800/40 rounded-lg text-center text-xs text-slate-500 italic">
                 No issues currently linked to this incident.
               </div>
             )}
           </div>
 
-          {/* SECTION 3: MITIGATION ACTIONS (Feature Flag Kill-Switch & Reversible Rollback) */}
-          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
+          {/* FEATURE-FLAG MITIGATIONS */}
+          <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider">
                 <ShieldCheck className="w-4 h-4" />
-                Feature-Flag Mitigations
+                Feature-Flag Mitigations ({incident.mitigations?.length || 0})
               </div>
               {canManage && (
                 <button
@@ -663,8 +672,7 @@ export default function IncidentDetailPage() {
             </div>
 
             <p className="text-xs text-slate-400">
-              Apply a controlled kill switch (disable flag, 0% rollout) to isolate regressions.
-              All mitigations preserve previous configuration and are completely reversible.
+              Controlled kill-switch with reversible rollback to isolate regressions.
             </p>
 
             {incident.mitigations && incident.mitigations.length > 0 ? (
@@ -672,13 +680,13 @@ export default function IncidentDetailPage() {
                 {incident.mitigations.map((mit) => (
                   <div
                     key={mit.id}
-                    className="p-4 bg-slate-800/50 border border-slate-700 rounded-xl space-y-3"
+                    className="p-3.5 bg-slate-800/50 border border-slate-700 rounded-lg space-y-2.5"
                   >
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <ZapOff className="w-4 h-4 text-rose-400" />
-                        <span className="font-semibold text-slate-100 text-sm">
-                          Feature Flag: '{mit.target_flag_key || mit.target_flag_id}'
+                        <ZapOff className="w-3.5 h-3.5 text-rose-400" />
+                        <span className="font-semibold text-slate-100 text-xs font-mono">
+                          Flag: {mit.target_flag_key || mit.target_flag_id}
                         </span>
                         {mit.target_environment_key && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-700 text-slate-300">
@@ -687,7 +695,7 @@ export default function IncidentDetailPage() {
                         )}
                       </div>
                       <span
-                        className={`px-2 py-0.5 rounded text-[11px] font-mono font-medium border self-start sm:self-center ${
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium border self-start sm:self-center ${
                           mit.status === 'executed'
                             ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                             : mit.status === 'reverted'
@@ -703,20 +711,18 @@ export default function IncidentDetailPage() {
 
                     {/* Pre-mitigation state snapshot */}
                     {mit.previous_state && (
-                      <div className="p-2.5 bg-slate-900/80 rounded border border-slate-700/60 text-[11px] font-mono text-slate-400">
-                        <span className="text-slate-500 block text-[10px] uppercase font-semibold">
-                          Pre-Mitigation Snapshot:
-                        </span>
+                      <div className="p-2 bg-slate-900/80 rounded border border-slate-700/60 text-[11px] font-mono text-slate-400">
+                        <span className="text-slate-500 font-semibold mr-2">Pre-Mitigation:</span>
                         <span>
                           Enabled: <strong className="text-slate-200">{String(mit.previous_state.enabled)}</strong>
-                          {' | '}
+                          {' · '}
                           Rollout: <strong className="text-slate-200">{mit.previous_state.rollout_percentage ?? 100}%</strong>
                         </span>
                       </div>
                     )}
 
                     <div className="flex items-center justify-between pt-1 border-t border-slate-700/50">
-                      <span className="text-[11px] text-slate-500 font-mono">
+                      <span className="text-[10px] text-slate-500 font-mono">
                         {mit.executed_at && `Executed: ${formatExactTimestamp(mit.executed_at)}`}
                       </span>
 
@@ -724,9 +730,9 @@ export default function IncidentDetailPage() {
                         {mit.status === 'executed' && canManage && (
                           <button
                             onClick={() => setMitigationToRevert(mit)}
-                            className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                            className="px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded text-xs font-semibold flex items-center gap-1 transition cursor-pointer"
                           >
-                            <RotateCcw className="w-3.5 h-3.5" />
+                            <RotateCcw className="w-3 h-3" />
                             Revert Mitigation (Restore Flag)
                           </button>
                         )}
@@ -737,9 +743,9 @@ export default function IncidentDetailPage() {
                               setSelectedMitigation(mit);
                               setShowApprovalModal(true);
                             }}
-                            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1"
+                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded text-xs font-semibold transition cursor-pointer flex items-center gap-1"
                           >
-                            <ZapOff className="w-3.5 h-3.5" />
+                            <ZapOff className="w-3 h-3" />
                             Approve Kill Switch
                           </button>
                         )}
@@ -749,7 +755,7 @@ export default function IncidentDetailPage() {
                 ))}
               </div>
             ) : (
-              <div className="p-4 bg-slate-800/40 rounded-lg text-center text-xs text-slate-500 italic">
+              <div className="p-3 bg-slate-800/40 rounded-lg text-center text-xs text-slate-500 italic">
                 No feature flag mitigations recorded for this incident.
               </div>
             )}
@@ -757,50 +763,72 @@ export default function IncidentDetailPage() {
         </div>
 
         {/* Right Column (1 Col): Activity Timeline */}
-        <div className="space-y-6">
-          <div className="p-5 bg-slate-900 border border-slate-800 rounded-xl space-y-4">
-            <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-              <Clock className="w-4 h-4 text-indigo-400" />
-              Activity Timeline
+        <div className="space-y-5">
+          <div className="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-indigo-400" />
+              Activity Timeline ({incident.timeline?.length || 0})
             </h2>
 
-            {/* Timeline Stream */}
-            <div className="relative pl-5 space-y-4 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800">
+            {/* Timeline Stream: timestamp ↓ event type ↓ short description */}
+            <div className="relative pl-5 space-y-3.5 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-800 max-h-[380px] overflow-y-auto pr-1">
               {incident.timeline && incident.timeline.length > 0 ? (
-                incident.timeline.map((ev) => (
-                  <div key={ev.id} className="relative text-xs space-y-1">
-                    <span
-                      className={`absolute -left-[1.35rem] top-1 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${
-                        ev.event_type === 'incident_resolved'
-                          ? 'bg-emerald-400'
-                          : ev.event_type?.includes('mitigation')
-                          ? 'bg-rose-500'
-                          : ev.event_type?.includes('issue')
-                          ? 'bg-amber-400'
-                          : 'bg-indigo-500'
-                      }`}
-                    />
-                    <div className="flex items-center justify-between text-[11px] text-slate-500">
-                      <span className="font-mono">{formatRelativeTime(ev.created_at)}</span>
-                      <span className="truncate max-w-[120px]">{ev.actor_email || 'System'}</span>
+                incident.timeline.map((ev) => {
+                  const isLong = ev.message && ev.message.length > 100;
+                  const isExpanded = !!expandedEvents[ev.id];
+
+                  return (
+                    <div key={ev.id} className="relative text-xs space-y-1">
+                      <span
+                        className={`absolute -left-[1.35rem] top-1 w-2.5 h-2.5 rounded-full border-2 border-slate-900 ${
+                          ev.event_type === 'incident_resolved'
+                            ? 'bg-emerald-400'
+                            : ev.event_type?.includes('mitigation')
+                            ? 'bg-rose-500'
+                            : ev.event_type?.includes('issue')
+                            ? 'bg-amber-400'
+                            : 'bg-indigo-500'
+                        }`}
+                      />
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                        <span title={formatExactTimestamp(ev.created_at)}>
+                          {formatRelativeTime(ev.created_at)}
+                        </span>
+                        <span className="truncate max-w-[100px]">{ev.actor_email || 'System'}</span>
+                      </div>
+                      <div className="text-[10px] uppercase font-mono font-semibold text-slate-400">
+                        {ev.event_type?.replace(/_/g, ' ')}
+                      </div>
+                      <div className="text-slate-200 font-medium leading-snug">
+                        {isLong && !isExpanded ? `${ev.message.slice(0, 100)}...` : ev.message}
+                      </div>
+                      {isLong && (
+                        <button
+                          type="button"
+                          onClick={() => toggleEventDetail(ev.id)}
+                          className="text-[10px] text-indigo-400 hover:text-indigo-300 cursor-pointer"
+                        >
+                          {isExpanded ? 'Less' : 'More'}
+                        </button>
+                      )}
                     </div>
-                    <div className="text-slate-200 font-medium">{ev.message}</div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="text-xs text-slate-500 italic">No timeline events recorded.</div>
               )}
             </div>
 
             {/* Add Investigation Note */}
-            <form onSubmit={handleAddNote} className="pt-3 border-t border-slate-800 space-y-2">
-              <label className="block text-xs font-semibold text-slate-400">Add Activity Note</label>
+            <form onSubmit={handleAddNote} className="pt-2 border-t border-slate-800 space-y-2">
+              <label htmlFor="timeline-note-input" className="block text-[11px] font-semibold text-slate-400">Add Timeline Note</label>
               <textarea
+                id="timeline-note-input"
                 rows={2}
                 value={newNote}
                 onChange={(e) => setNewNote(e.target.value)}
-                placeholder="Log observation, root-cause findings, or mitigation status..."
-                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-rose-500"
+                placeholder="Log observation or root-cause finding..."
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:ring-1 focus:ring-rose-500"
               />
               <button
                 type="submit"
@@ -814,6 +842,13 @@ export default function IncidentDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* AI INCIDENT COPILOT WORKBENCH */}
+      <IncidentCopilotSection
+        tenantId={selectedTenant?.id}
+        projectId={currentProject?.id}
+        incidentId={incident.id}
+      />
 
       {/* Link Issue Modal */}
       {showLinkModal && (

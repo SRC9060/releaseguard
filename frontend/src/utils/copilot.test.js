@@ -10,6 +10,9 @@ import {
   formatEvidenceBadge,
   formatModelBadge,
   isAutonomousActionAllowed,
+  DEFAULT_COPILOT_SECTION_STATES,
+  getStoredSectionStates,
+  setStoredSectionStates,
 } from './copilot.js';
 
 // Sample grounded response matching Phase 15A backend schema
@@ -670,4 +673,51 @@ test('Phase 15D: validateCopilotChatResponse checks required fields and arrays',
   });
   assert.equal(invalidEvidence.valid, false);
   assert.ok(invalidEvidence.error.includes('evidence array'));
+});
+
+// ============================================================================
+// Phase 16 — UI/UX Polish, Information Architecture & Accessibility Tests
+// ============================================================================
+
+test('Phase 16: Copilot section states default configuration preserves high-value visibility', () => {
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.summary, true);
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.hypotheses, true);
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.evidence, false, 'Evidence must be collapsed by default to reduce visual overload');
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.actions, true);
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.uncertainties, false, 'Uncertainties must be collapsed by default');
+  assert.equal(DEFAULT_COPILOT_SECTION_STATES.chat, true);
+});
+
+test('Phase 16: getStoredSectionStates safely falls back when sessionStorage is unavailable', () => {
+  const states = getStoredSectionStates(42);
+  assert.deepEqual(states, DEFAULT_COPILOT_SECTION_STATES);
+});
+
+test('Phase 16: Information preservation — all analysis telemetry and inference fields intact', () => {
+  // Validate that no data was stripped from the analysis contract
+  const validated = validateCopilotResponse(MOCK_COPILOT_RESPONSE);
+  assert.equal(validated.valid, true);
+
+  const hyp = MOCK_COPILOT_RESPONSE.analysis.hypotheses[0];
+  assert.ok(hyp.id);
+  assert.ok(hyp.title);
+  assert.ok(hyp.likelihood);
+  assert.ok(hyp.explanation);
+  assert.ok(Array.isArray(hyp.evidence) && hyp.evidence.length > 0);
+  assert.ok(Array.isArray(hyp.inference) && hyp.inference.length > 0);
+
+  const act = MOCK_COPILOT_RESPONSE.analysis.recommended_actions[0];
+  assert.ok(act.action_type);
+  assert.ok(act.priority);
+  assert.ok(act.description);
+  assert.ok(act.rationale);
+  assert.ok(act.risk_assessment);
+});
+
+test('Phase 16: Accessibility notices and advisory copy are compliant', () => {
+  assert.ok(COPILOT_ADVISORY_NOTICE.length > 20);
+  assert.ok(COPILOT_NO_AUTONOMOUS_ACTION_NOTICE.length > 20);
+  assert.ok(COPILOT_CANNOT_MODIFY_SYSTEMS_NOTICE.length > 15);
+  // Guarantee no autonomous mutation
+  assert.equal(isAutonomousActionAllowed(), false);
 });

@@ -190,3 +190,42 @@ export function formatModelBadge(modelName) {
   return modelName;
 }
 
+/**
+ * Phase 16 — UI State Persistence for Collapsible Copilot Sections
+ */
+export const DEFAULT_COPILOT_SECTION_STATES = {
+  summary: true,
+  hypotheses: true,
+  evidence: false,
+  actions: true,
+  uncertainties: false,
+  chat: true,
+};
+
+export function getStoredSectionStates(incidentId, defaults = DEFAULT_COPILOT_SECTION_STATES) {
+  if (typeof window === 'undefined' || !window.sessionStorage) {
+    return { ...defaults };
+  }
+  try {
+    const raw = window.sessionStorage.getItem(`rg_copilot_sections_${incidentId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return { ...defaults, ...parsed };
+    }
+  } catch {
+    // fallback
+  }
+  return { ...defaults };
+}
+
+export function setStoredSectionStates(incidentId, states) {
+  if (typeof window === 'undefined' || !window.sessionStorage) {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(`rg_copilot_sections_${incidentId}`, JSON.stringify(states));
+  } catch {
+    // fallback
+  }
+}
+
