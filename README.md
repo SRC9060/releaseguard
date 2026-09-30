@@ -1,346 +1,315 @@
-# ReleaseGuard v0.1 — Production-Hardened Release Reliability Platform
+# ReleaseGuard — Developer Reliability & Release Protection Platform
 
-ReleaseGuard is a developer reliability, error-tracking, and controlled mitigation platform. It bridges continuous telemetry ingestion with deterministic feature flag delivery and human-in-the-loop incident mitigation.
+ReleaseGuard is a developer reliability, error-tracking, and controlled mitigation platform. It bridges asynchronous high-throughput telemetry ingestion with deterministic feature flag delivery, reversible incident mitigation, and an evidence-grounded AI Incident Copilot.
 
 ---
 
 ## 1. Project Overview
 
-ReleaseGuard provides a modern, full-stack reliability engineering toolkit:
-- High-throughput asynchronous error event ingestion via Redis Streams.
-- Frame normalization, cryptographic stack trace fingerprinting, and concurrency-safe PostgreSQL issue aggregation.
-- Multi-tenancy with Role-Based Access Control (Owner, Admin, Member) and transactional Last-Owner protection.
-- Deterministic feature flag delivery with percentage-based rollouts and ETag/304 caching.
-- Automated anomaly detection correlating error spikes to recent deployments and feature flags.
-- Controlled incident mitigation requiring explicit authenticated human approval.
-- Full audit logging tracking every flag change, rollout shift, and mitigation action.
+Modern software teams face a critical reliability gap: error-tracking tools passively alert on crashes, but resolving incidents requires disparate dashboards, manual feature-flag toggling, risky production rollbacks, and high-stress on-call triage.
+
+ReleaseGuard unifies this lifecycle into a single, cohesive developer platform:
+- **Asynchronous Telemetry Ingestion**: High-throughput non-blocking ingestion via Redis Streams.
+- **Root-Cause Deduplication**: Deterministic frame normalization and SHA-256 stack trace fingerprinting.
+- **Deterministic Feature Flags**: Sub-millisecond mathematical rollouts (`CRC32 % 100`) with ETag/304 caching.
+- **Reversible Incident Mitigation**: Atomic pre-mitigation state snapshots and one-click rollback.
+- **AI Incident Copilot**: Grounded root-cause analysis and conversational investigation powered by Gemini with primary/fallback resiliency and strict advisory-only safety.
+- **Multi-Tenant Security**: Tenant-scoped authorization, RBAC (Owner, Admin, Member), and secret-scrubbed observability.
 
 ---
 
-## 2. Architecture
+## 2. Problem Statement
+
+1. **Alert Fatigue & Duplicate Explosion**: A single distributed failure can generate 100,000 exceptions per minute. Without normalized fingerprinting, databases crash and incident queues become unreadable.
+2. **High-Risk Rollbacks**: Reverting a 50-commit deployment to mitigate a minor regression introduces secondary downtime and delays un-related bug fixes.
+3. **Configuration Loss During Firefights**: When an engineer disables a feature flag during an outage, the previous percentage rollout is forgotten, turning recovery into an error-prone manual reconfiguration.
+4. **Autonomous AI Risk**: Naive AI agents with write permissions to production infrastructure risk catastrophic data loss. AI assistance must be strictly grounded, advisory-only, and verifiable.
+
+---
+
+## 3. Architecture Diagram
 
 ```
-                      +---------------------------------------+
-                      |       Host Application / Client       |
-                      +---------------------------------------+
-                                          |
-                      (non-blocking queue)| (async HTTP)
-                                          v
-                      +---------------------------------------+
-                      |      ReleaseGuard Python SDK          |
-                      +---------------------------------------+
-                                          |
-                                          | POST /api/v1/projects/{id}/events/bulk
-                                          v
 +-----------------------------------------------------------------------------+
-|                          FastAPI API Service                                |
-|  - Correlation ID Middleware (X-Request-ID)                                 |
-|  - Security Headers (nosniff, DENY, strict-origin)                          |
-|  - Payload Size Limiter (413 Payload Too Large)                             |
-|  - Distributed Auth Rate Limiter & Lockout (429 Too Many Requests)          |
-|  - JWT Authentication (HS256) & RBAC Enforcement                            |
-|  - Separation: Liveness (/health) & Readiness (/health/ready)               |
+|                                CLIENT TIER                                  |
+|   +-----------------------+                    +------------------------+   |
+|   |   React Dashboard     |                    |   Host Application     |   |
+|   |   (Vite SPA / Vercel) |                    |   (ReleaseGuard SDK)   |   |
+|   +-----------+-----------+                    +-----------+------------+   |
++---------------|--------------------------------------------|----------------+
+                | HTTP / JWT                                 | HTTP / API Key
+                v                                            v
 +-----------------------------------------------------------------------------+
-            |                                           |
-    (enqueue events)                               (read state)
-            v                                           v
-+-------------------------------+           +---------------------------------+
-|   Redis Streams Event Queue   |           |    PostgreSQL Persistent DB     |
-|  - Stream: events:stream      |           |  - Managed via Alembic          |
-|  - Consumer: releaseguard:wrk |           |  - Concurrency-safe Upserts     |
-|  - Stale PEL Recovery         |           |  - Strict Tenant Scoping        |
-|  - Trimming (MAXLEN ~100000)  |           |  - Connection Pooling           |
-+-------------------------------+           +---------------------------------+
-            |                                           ^
-            | (batch dequeue)                           | (atomic transaction)
-            v                                           |
-+-------------------------------------------------------+                     |
-|           Background Ingestion Worker (worker.py)     |---------------------+
-|  - Frame Normalization & SHA-256 Fingerprinting       |
-|  - Idempotent Event Insert & Regression Detection     |
-|  - Exponential Reconnect Backoff & Stale PEL Recovery |
-+-------------------------------------------------------+
+|                                BACKEND API                                  |
+|      FastAPI ASGI Engine (Uvicorn) - Stateless, Horizontally Scalable       |
+|                                                                             |
+|  * Auth & RBAC (JWT HS256)           * API Key Validation                   |
+|  * Multi-Tenant Isolation Scoping    * Ingestion Handler (HTTP 202)         |
+|  * Config Evaluation (ETag Caching)  * Health & Readiness Probes            |
+|  * Copilot Rate Limiter & Dedup      * Secret Scrubbing Middleware          |
++---------------+--------------------------------------------+----------------+
+                |                                            |
+         SQL    |                                            | XADD Stream
+                v                                            v
++-------------------------------+            +--------------------------------+
+|       PERSISTENT STORE        |            |         STREAM BUFFER          |
+|         PostgreSQL 17         |            |            Redis 7             |
+|  * Relational Schema          |            |  * Redis Streams               |
+|  * Unique idempotency indexes |            |    ('events:stream')           |
+|  * Persisted Copilot records  |            |  * Consumer Group              |
++---------------+---------------+            |    ('events:group')            |
+                ^                            +---------------+----------------+
+                |                                            |
+                | SQL (Transactional upserts)                | XREADGROUP / XACK
+                |                                            v
++---------------+-------------------------------------------------------------+
+|                              ASYNC WORKER TIER                              |
+|                      IngestionWorker (Python Process)                       |
+|  * Multi-consumer Group Worker       * Stale Pending Entry Recovery (PEL)   |
+|  * Batch Processing (XREADGROUP)     * Dead-Letter Queue (DLQ Routing)      |
+|  * Idempotent Event Deduplication    * Graceful Signal Handling (SIGINT)    |
++-----------------------------------------------------------------------------+
 ```
 
 ---
 
-## 3. Main Capabilities
+## 4. Core Workflow
 
-- **Asynchronous Telemetry Ingestion**: Ingest endpoints respond in under 25ms (`HTTP 202 Accepted`), queuing payloads onto Redis Streams (`events:stream`).
-- **End-to-End Idempotency**: Stable UUID4 `event_id` enforced by PostgreSQL unique constraints. Re-delivered messages are safely rolled back and acknowledged via `XACK` without corrupting counts.
-- **Deterministic Feature Rollouts**: Rollout buckets are calculated via `CRC32(flag_key + ":" + user_id) % 100`. For any user and flag, evaluation results are mathematically stable.
-- **Issue Grouping & Regression Detection**: Resolving an issue transitions it to `resolved`. New occurrences automatically trigger regression detection, returning the issue to `unresolved`.
-- **Advisory Mitigation with Human-in-the-Loop**: Spikes produce actionable root-cause recommendations (kill feature flag or rollback release). Destructive mitigations require explicit human approval and record an immutable audit trail.
-- **Multi-Tenant Data Scoping**: Client requests cannot forge tenant identity; row-level query scoping prevents cross-tenant data leakage.
-
----
-
-## 4. Tech Stack
-
-- **Backend API**: Python 3.12, FastAPI, Uvicorn, SQLAlchemy 2.0, Pydantic v2, PyJWT, bcrypt.
-- **Persistent Database**: PostgreSQL 17.
-- **Queue / Cache**: Redis 7 (Redis Streams, Consumer Groups, Distributed Keys).
-- **Database Migrations**: Alembic.
-- **Frontend Dashboard**: React 18, Vite, TailwindCSS, Lucide Icons.
-- **Frontend Web Server**: Nginx (Alpine).
-- **Client SDK**: Python SDK with non-blocking worker thread and bounded queue.
+1. **Capture**: Client application encounters an unhandled exception; ReleaseGuard SDK captures frames non-blockingly.
+2. **Ingest**: API accepts event payload (`HTTP 202 Accepted`) and appends to Redis Streams (`events:stream`) in < 25ms.
+3. **Process**: Ingestion worker parses stack traces, strips memory addresses, hashes normalized frames via SHA-256, and upserts into PostgreSQL issues.
+4. **Detect & Correlate**: Spike detection engine identifies anomaly clusters and links recent releases and feature flag updates.
+5. **Mitigate**: Operator applies a targeted kill switch. ReleaseGuard snapshots pre-mitigation state (e.g. `rollout: 25%`) and disables the flag immediately.
+6. **Investigate**: AI Incident Copilot analyzes telemetry, produces candidate hypotheses (H1, H2), and answers operator queries with grounded database citations.
+7. **Recover**: Operator clicks *"Revert Mitigation"*, restoring the exact pre-incident rollout percentage instantly.
 
 ---
 
-## 5. Repository Structure
+## 5. Multi-Tenancy Model
 
-```
-releaseguard_v0_1/
-├── backend/
-│   ├── alembic.ini                   # Alembic configuration
-│   ├── Dockerfile                    # Production backend container definition
-│   ├── migrations/                   # Alembic database migrations
-│   │   ├── env.py
-│   │   └── versions/
-│   ├── app/                          # FastAPI application core
-│   │   ├── auth.py                   # JWT & password hashing
-│   │   ├── auth_limiter.py           # Distributed Redis auth rate limiter
-│   │   ├── config.py                 # Pydantic environment settings
-│   │   ├── db.py                     # SQLAlchemy session & engine
-│   │   ├── models.py                 # SQLAlchemy database models
-│   │   ├── queue.py                  # Redis Streams event queue
-│   │   ├── worker.py                 # Autonomous ingestion worker
-│   │   ├── routers/                  # API endpoints
-│   │   │   ├── auth.py
-│   │   │   ├── events.py
-│   │   │   ├── flags.py
-│   │   │   ├── incidents.py
-│   │   │   ├── issues.py
-│   │   │   ├── metrics.py
-│   │   │   ├── releases.py
-│   │   │   └── tenants.py
-│   │   └── main.py                   # Application entrypoint & middleware
-│   ├── scripts/                      # Operational scripts
-│   │   ├── run_benchmarks.py         # Performance benchmark suite
-│   │   ├── seed_demo.py              # Deterministic demo data seeder
-│   │   └── verify_migration_equivalence.py
-│   └── tests/                        # Backend test suite (pytest)
-├── frontend/
-│   ├── Dockerfile                    # Production frontend container
-│   ├── nginx.conf                    # Nginx SPA & security config
-│   ├── src/                          # React application code
-│   │   ├── components/               # UI components
-│   │   ├── context/                  # React Auth & Project Context
-│   │   ├── pages/                    # Route pages
-│   │   └── services/                 # API client layer (api.js)
-│   └── package.json
-├── sdk/
-│   └── python/                       # ReleaseGuard Python SDK
-│       ├── releaseguard/
-│       └── tests/
-├── docs/                             # Documentation
-│   ├── architecture.md
-│   ├── deployment.md
-│   ├── demo.md
-│   ├── project_summary.md
-│   └── security_audit.md
-├── docker-compose.yml                # Production staging orchestration
-├── .env.example                      # Production environment template
-└── README.md
-```
+ReleaseGuard enforces strict tenant isolation at every layer:
+- **Hierarchical Scoping**: `Tenant` -> `Projects` -> `Issues` / `Releases` / `Flags` / `Incidents`.
+- **Zero Client Trust**: Client-supplied `tenant_id` parameters in URL paths or headers are never trusted. Every request verifies authenticated JWT claims against server-side `Membership` tables.
+- **Enumeration Defense**: Requests for resources outside the user's authorized tenant return `HTTP 404 Not Found` rather than `HTTP 403 Forbidden` to prevent resource probing.
+- **RBAC Roles**:
+  - `owner`: Full organizational control, billing, member invites, and project deletion. Protected by transactional Last-Owner safety.
+  - `admin`: Operational management (feature flags, releases, incidents, mitigations).
+  - `member`: Read-only telemetry inspection and comment posting.
 
 ---
 
-## 6. Local Setup
+## 6. Error Ingestion Pipeline
+
+- **HTTP 202 Accepted**: Ingest endpoints decouple HTTP receipt from database persistence.
+- **Payload Validation**: Strict Pydantic v2 schemas reject malformed JSON before queue admission.
+- **Payload Guardrails**: Maximum payload size enforced (`413 Payload Too Large`), preventing memory saturation.
+- **Non-Blocking SDK Transport**: Python SDK uses an asynchronous background worker thread with a bounded queue (`max_size=1000`) and oldest-drop backpressure policy.
+
+---
+
+## 7. Redis + Worker Architecture
+
+- **Consumer Groups (`XREADGROUP`)**: Scalable horizontal consumer processing with persistent offsets.
+- **Pending Entry List (`PEL`) Recovery**: Worker periodically inspects `XPENDING` to claim abandoned messages from crashed worker instances.
+- **Dead-Letter Queue (`events:dlq`)**: Poison-pill messages that fail processing after 3 retries are diverted to `events:dlq` with failure metadata.
+- **Stream Trimming**: Bounded Redis memory via approximate trimming (`MAXLEN ~ 100,000`).
+
+---
+
+## 8. Issue Fingerprinting & Deduplication
+
+- **Frame Normalization**: Strips memory pointers (`0x7f...`), variable line numbers from minor refactors, and host-specific path prefixes (`/var/app/...` vs `C:\app\...`).
+- **Cryptographic Fingerprint**: Normalized frames and exception types are concatenated and hashed via `SHA-256`.
+- **Atomic Concurrency-Safe Upsert**: Uses PostgreSQL row-level locking (`SELECT ... FOR UPDATE`) and advisory locks to safely increment issue counts during concurrent ingestion spikes.
+- **Regression Detection**: Re-opening an issue in `resolved` state automatically flips status to `unresolved` and increments the regression counter.
+
+---
+
+## 9. Feature Flags & Deterministic Rollout
+
+- **Stateless Mathematical Distribution**: Evaluated via `CRC32(flag_key + ":" + user_id) % 100`.
+- **Client Stability**: A user in a 10% canary cohort remains consistently in that cohort across devices and sessions without server database reads.
+- **Sub-10ms Config Polling**: Config endpoint serves flag definitions with HTTP `ETag` and `If-None-Match` validation, responding with `304 Not Modified` in ~6ms.
+- **Immutable Audit Logging**: Every status change, rollout shift, and description edit records an audit entry (`flag_audit_logs`).
+
+---
+
+## 10. Incident Management & Reversible Mitigation
+
+- **Incident Lifecycle**: `open` -> `investigating` -> `monitoring` -> `mitigated` -> `resolved` -> `closed`.
+- **Linked Scope**: Incidents correlate multiple linked error issues, deployments, and feature flags.
+- **Atomic Pre-Mitigation Snapshots**: Applying a kill switch snapshots `previous_state: {enabled: true, rollout_percentage: 25}` into `IncidentMitigation`.
+- **One-Click Reversion**: Restoring a mitigation automatically reapplies the exact historical rollout percentages without manual reconfiguration.
+
+---
+
+## 11. AI Incident Copilot
+
+- **Dual-Model Resilient Architecture**: Primary model `gemini-3.8-flash` with 1 retry on transient capacity failures (`503`, `429`), followed by automated failover to `gemini-3.5-flash-lite`.
+- **Strict Evidence Grounding**: Hypotheses (H1, H2) are verified against database records. Citations must match real project entities (`issue`, `release`, `feature_flag`, `mitigation`, `timeline`). Nonexistent or foreign citations are discarded into `uncertainties`.
+- **Evidence vs Inference Separation**: High-contrast visual and conceptual separation between observed telemetry facts and AI deductive reasoning.
+- **Hallucination Refusal**: Explicit refusal to invent missing metrics (CPU utilization, database connection pools, customer IDs, exact code lines, RPS).
+- **Prompt-Injection Defense**: Untrusted error messages, stack traces, and chat inputs are enclosed in structured `DATA ENVELOPE` delimiters, remaining inert data.
+- **Advisory-Only Safety**: Copilot has zero autonomous authority to modify production feature flags, execute shell/database commands, or resolve incidents.
+
+---
+
+## 12. Security Model
+
+- **Authentication**: JWT tokens signed via `HS256` with expiration and user session verification.
+- **Header-Based AI Auth**: External Gemini requests strictly pass API keys via `x-goog-api-key` headers; URL query parameters are forbidden.
+- **Secret Scrubbing Filter**: Regex sanitization scrubs passwords, bearer tokens, and Google API keys from logs and outbound AI context envelopes.
+- **Rate Limiting & Lockout**: Redis sliding-window limiter on login endpoints triggers account lockout after consecutive failures. Copilot requests enforce double-click deduplication (< 1.0s) and burst limits (30 req/min).
+
+---
+
+## 13. Deployment Architecture
+
+- **Backend API & Worker**: Hosted on Render as containerized Web Service and Background Worker instances.
+- **Database**: Managed PostgreSQL 17 with connection pooling and automated backups.
+- **Queue / Cache**: Managed Redis 7 instance.
+- **Frontend Dashboard**: Deployed as an optimized static SPA on Vercel with HTTPS edge caching.
+
+---
+
+## 14. Local Development Setup
 
 ### Prerequisites
-- Python 3.11+
-- Node.js 20+ (with npm)
-- PostgreSQL 16+ running on `localhost:5432`
-- Redis 6.2+ running on `localhost:6379`
+- Python 3.12+
+- Node.js 20+
+- PostgreSQL 17
+- Redis 7
 
-### Environment File Setup
-Copy the example environment template:
+### Backend Setup
 ```bash
-cp .env.example .env
-```
+# 1. Clone repository
+git clone https://github.com/your-org/releaseguard.git
+cd releaseguard
 
----
+# 2. Set up virtual environment
+python -m venv .venv
+.\.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/macOS
 
-## 7. PostgreSQL Setup
+# 3. Install dependencies
+pip install -r backend/requirements.txt
+pip install -e sdk/python
 
-Create a database dedicated to ReleaseGuard:
-```sql
-CREATE DATABASE releaseguard;
-CREATE USER postgres WITH ENCRYPTED PASSWORD 'postgres';
-GRANT ALL PRIVILEGES ON DATABASE releaseguard TO postgres;
-```
+# 4. Configure environment
+cp backend/.env.example backend/.env
 
----
-
-## 8. Redis Setup
-
-Ensure Redis is installed and running on port `6379`:
-```bash
-redis-cli ping
-# Expected response: PONG
-```
-
----
-
-## 9. Environment Variables
-
-Configure `.env` with required parameters:
-```env
-ENVIRONMENT=development
-DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/releaseguard
-REDIS_URL=redis://127.0.0.1:6379/0
-JWT_SECRET=your-32-byte-hex-secret-must-be-secure
-JWT_EXPIRATION_MINUTES=1440
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-FRONTEND_URL=http://localhost:5173
-MAX_PAYLOAD_SIZE=1048576
-MAX_BULK_PAYLOAD_SIZE=5242880
-MAX_BULK_EVENTS=100
-AUTH_MAX_ATTEMPTS=5
-AUTH_LOCKOUT_SECONDS=900
-```
-
----
-
-## 10. Alembic Migrations
-
-All schema changes are tracked and applied through Alembic:
-```bash
+# 5. Run migrations
 cd backend
 alembic upgrade head
-```
 
----
-
-## 11. Backend Startup
-
-To run the backend in production mode without reload:
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-For development with hot reloading:
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-
----
-
-## 12. Worker Startup
-
-Run the Redis Streams ingestion worker in an independent process:
-```bash
+# 6. Start API server & worker
+uvicorn app.main:app --reload --port 8000
 python -m app.worker
 ```
-The worker will automatically create consumer groups, process queued events, handle stale PEL entries, and route toxic events to `events:dlq`.
 
----
-
-## 13. Frontend Startup
-
-For local development:
+### Frontend Setup
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-For production build:
+
+---
+
+## 15. Environment Variables
+
+| Variable | Description | Default / Example |
+| :--- | :--- | :--- |
+| `ENVIRONMENT` | Runtime environment (`development`, `test`, `production`) | `development` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/releaseguard` |
+| `REDIS_URL` | Redis connection string | `redis://localhost:6379/0` |
+| `JWT_SECRET` | Secret key for signing JWT tokens | *(secure random secret)* |
+| `JWT_EXPIRY_MINUTES` | Token lifetime in minutes | `1440` (24 hours) |
+| `GEMINI_API_KEY` | Google Gemini API key for Incident Copilot | *(optional; defaults to mock provider if empty)* |
+| `COPILOT_PROVIDER` | AI provider implementation (`gemini`, `mock`) | `gemini` |
+| `COPILOT_MODEL` | Primary AI model name | `gemini-3.8-flash` |
+| `COPILOT_FALLBACK_MODEL` | Failover AI model name | `gemini-3.5-flash-lite` |
+| `VITE_API_BASE_URL` | Frontend API backend target | `http://localhost:8000` |
+
+---
+
+## 16. Testing
+
+ReleaseGuard maintains comprehensive test coverage:
+
 ```bash
+# 1. Backend & SDK test suite (220 tests)
+pytest -q backend sdk/python/tests
+
+# 2. Frontend test suite (50 tests)
 cd frontend
+npm test
+
+# 3. Frontend production build validation
 npm run build
+
+# 4. Database migration check
+alembic check
 ```
 
 ---
 
-## 14. Test Commands
+## 17. Production Deployment
 
-Run the full automated test suite (98 tests across backend and SDK):
+- **Production API URL**: `https://releaseguard-api-0jbc.onrender.com`
+- **Production Dashboard**: `https://releaseguard-two.vercel.app`
+- **Health Probes**:
+  - `GET /health`: Liveness probe (`HTTP 200 OK`).
+  - `GET /health/ready`: Readiness probe verifying PostgreSQL and Redis connections.
+
+---
+
+## 18. Example API Flow
+
+### Ingest Error Event
 ```bash
-pytest -v backend sdk/python/tests
+curl -X POST https://releaseguard-api-0jbc.onrender.com/api/v1/projects/1/events \
+  -H "Content-Type: application/json" \
+  -H "X-ReleaseGuard-Key: rg_live_demo_checkout_service_key_99" \
+  -d '{
+    "exception_type": "PaymentGatewayTimeout",
+    "message": "Stripe timeout after 3000ms",
+    "stack_trace": "File \"/app/checkout.py\", line 142\n  raise PaymentGatewayTimeout()",
+    "environment": "production",
+    "release": "v2.4.1"
+  }'
+```
+**Response (`HTTP 202 Accepted`)**:
+```json
+{
+  "status": "queued",
+  "event_id": "018f3a9b-4b3c-7192-802a-9e1284560123",
+  "fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
 ```
 
----
-
-## 15. Seed / Demo Data
-
-To populate deterministic sample data for demonstrations:
+### Evaluate Feature Flag
 ```bash
-python backend/scripts/seed_demo.py
+curl -s "https://releaseguard-api-0jbc.onrender.com/api/v1/projects/1/config?environment=production" \
+  -H "If-None-Match: \"a1b2c3d4\""
 ```
-This idempotently creates:
-- **Organization**: Acme Corp
-- **User**: `demo@releaseguard.dev` / `DemoPassword123!`
-- **Project**: Checkout Service
-- **Environments**: development, staging, production
-- **Releases**: `1.0.0`, `1.1.0`, `1.2.0`
-- **Feature Flags**: `new_checkout`, `new_payment_flow`, `experimental_dashboard`
-- **Sample Issues**: `DatabaseConnectionTimeout`, `PaymentGatewayError`, `AuthenticationError`
-- **Incidents**: `Payment Gateway Surge`, `Database Error Spike`
-
----
-
-## 16. Deployment Architecture
-
-In production, ReleaseGuard deploys as isolated containers:
-1. **Frontend**: Static bundle served via Alpine Nginx.
-2. **API**: FastAPI running under Uvicorn ASGI behind a load balancer.
-3. **Worker**: Standalone background Python consumer.
-4. **PostgreSQL**: Managed persistent relational cluster.
-5. **Redis**: Managed Redis cluster with persistence enabled.
-
-Refer to [`docs/deployment.md`](file:///d:/releaseguard_v0_1/docs/deployment.md) for full instructions and Kubernetes/Docker specifications.
-
----
-
-## 17. Health & Readiness Checks
-
-- **Liveness Probe**: `GET /health` -> `{"status": "ok", "service": "releaseguard-api"}`
-- **Readiness Probe**: `GET /health/ready` -> Verifies active PostgreSQL and Redis connectivity:
-  ```json
-  {
-    "status": "ready",
-    "checks": {
-      "database": "connected",
-      "redis": "connected"
+**Response (`HTTP 304 Not Modified` or `HTTP 200 OK`)**:
+```json
+{
+  "environment": "production",
+  "flags": {
+    "new_checkout_flow": {
+      "enabled": true,
+      "rollout_percentage": 25
     }
   }
-  ```
+}
+```
 
 ---
 
-## 18. Example ReleaseGuard Workflow
+## 19. Limitations & Technical Debt
 
-See [`docs/demo.md`](file:///d:/releaseguard_v0_1/docs/demo.md) for the complete 18-step interactive scenario covering:
-1. Release deployment (`v1.3.0`)
-2. Feature flag rollout (`25%`)
-3. SDK error telemetry ingestion
-4. Asynchronous worker ingestion & issue deduplication
-5. Anomaly detection & incident triggering
-6. Automated correlation with release & flag
-7. Human-approved mitigation (flag kill-switch)
-8. Audit trail verification and incident resolution
-
----
-
-## 19. Known Limitations
-
-- **Stateless JWT Blacklisting**: Revoking a compromised token before expiration requires token expiration or client-side storage clearance.
-- **Worker Scale Group Coordination**: Workers coordinate via Redis consumer groups; duplicate worker identifiers within the same consumer group must be avoided.
-- **Telemetry Throttling**: Ingestion rate limits rely on upstream reverse proxies (Nginx / Cloudflare) to protect the edge API from massive volumetric DDoS.
-
----
-
-## 20. Benchmark Methodology
-
-Benchmarks are executed via `backend/scripts/run_benchmarks.py` using statistical sampling across 50 iterations:
-
-| Metric | Sample Size | Mean | Median | P95 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Config Evaluation (ETag Cached)** | 50 | **6.64 ms** | **6.58 ms** | **7.68 ms** |
-| **Paginated Issue Query (`limit=20`)** | 50 | **15.64 ms** | **15.50 ms** | **16.92 ms** |
-| **Paginated Event Query (`limit=20`)** | 50 | **22.01 ms** | **19.76 ms** | **22.92 ms** |
-| **Authenticated API Request** | 50 | **19.45 ms** | **19.34 ms** | **22.50 ms** |
-| **Bulk Event Ingestion (`25 events`)** | 50 | **23.74 ms** | **23.65 ms** | **27.44 ms** |
-| **Worker Batch Processing (`10 events`)** | 25 | **103.57 ms**| **101.72 ms**| **114.00 ms**|
-
-*Measurements conducted locally on Windows 11, Python 3.12, PostgreSQL 17, Redis 7.*
+1. **Vite Bundle Splitting**: The main frontend bundle is ~887 kB. While fully functional, dynamic route-based imports (`React.lazy`) can further optimize initial chunk size in future milestones.
+2. **Horizontal Redis Scaling**: Ingestion uses a single Redis stream. For ultra-high scale (> 100k events/sec), partitioned stream keys (`events:stream:{shard}`) can be implemented.
+3. **Multi-Region Latency**: The primary PostgreSQL cluster is centralized; client edge evaluations currently rely on HTTP ETag caching rather than edge KV replication.

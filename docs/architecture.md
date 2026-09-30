@@ -1,4 +1,4 @@
-# ReleaseGuard Architecture
+# ReleaseGuard Architecture Specification (v1.0.0)
 
 ## 1. System Topology Overview
 
@@ -9,8 +9,8 @@ ReleaseGuard is a high-throughput, concurrency-safe release monitoring, error tr
 |                                CLIENT TIER                                  |
 |                                                                             |
 |   +-----------------------+                    +------------------------+   |
-|   |   React Dashboard     |                    |   Python Client App    |   |
-|   |      (Vite SPA)       |                    |     (ReleaseGuard SDK) |   |
+|   |   React Dashboard     |                    |   Host Application     |   |
+|   |   (Vite SPA / Vercel) |                    |   (ReleaseGuard SDK)   |   |
 |   +-----------+-----------+                    +-----------+------------+   |
 +---------------|--------------------------------------------|----------------+
                 | HTTP / JWT                                 | HTTP / API Key
@@ -23,6 +23,7 @@ ReleaseGuard is a high-throughput, concurrency-safe release monitoring, error tr
 |  * Auth & RBAC (JWT HS256)           * API Key Validation                   |
 |  * Multi-Tenant Isolation Scoping    * Ingestion Handler (HTTP 202)         |
 |  * Config Evaluation (ETag Caching)  * Health & Readiness Probes            |
+|  * Copilot Rate Limiting & Dedup     * Secret Scrubbing Middleware          |
 +---------------+--------------------------------------------+----------------+
                 |                                            |
          SQL    |                                            | XADD Stream
@@ -36,6 +37,7 @@ ReleaseGuard is a high-throughput, concurrency-safe release monitoring, error tr
 |  * Row-level concurrency lock |            |    ('events:stream')           |
 |  * Unique idempotency indexes |            |  * Consumer Group              |
 |  * Alembic-managed migrations |            |    ('events:group')            |
+|  * Persisted Copilot records  |            |  * Copilot Request Limiter     |
 +---------------+---------------+            |  * Auth Rate Limiter Keys      |
                 ^                            +---------------+----------------+
                 |                                            |
@@ -54,145 +56,139 @@ ReleaseGuard is a high-throughput, concurrency-safe release monitoring, error tr
 
 ---
 
-## 2. Core Components
-
-### 2.1 Frontend Dashboard
-- **Technology**: React 18, Vite, TailwindCSS, Lucide Icons.
-- **Role**: Provides operators and engineers with real-time issue exploration, event stack traces, release monitoring, deterministic rollout controls, incident command dashboards, and audit histories.
-- **Production Delivery**: Pre-compiled static assets served by an optimized Nginx container with SPA routing (`try_files $uri $uri/ /index.html`), gzip compression, and HTTP security headers (`X-Frame-Options`, `X-Content-Type-Options`).
-- **Configuration**: Uses dynamic backend configuration via `VITE_API_BASE_URL`.
-
-### 2.2 Backend API
-- **Technology**: FastAPI, Python 3.12, Uvicorn ASGI server, Pydantic v2, SQLAlchemy 2.0.
-- **Role**: Exposes RESTful endpoints for dashboard queries, administrative mutations, and high-throughput event ingestion.
-- **Stateless Execution**: The API process is completely stateless and can scale horizontally behind a load balancer. It relies on Redis for distributed rate-limiting and streams, and PostgreSQL for relational state.
-- **Observability**: Exposes `/health` (liveness) and `/health/ready` (readiness verifying live PostgreSQL and Redis connections).
-
-### 2.3 Redis Stream Buffer
-- **Technology**: Redis 7.
-- **Role**: Acts as the high-speed shock absorber for incoming telemetry.
-- **Stream Architecture**:
-  - Main Stream: `events:stream`
-  - Consumer Group: `events:group`
-  - Dead Letter Queue: `events:dlq`
-- **Stream Retention**: Stream size is bounded using approximate trimming (`XADD MAXLEN ~ 100,000`) to prevent memory exhaustion during sustained high-throughput bursts.
-
-### 2.4 Asynchronous Ingestion Worker
-- **Technology**: Standalone Python process (`python -m app.worker`).
-- **Role**: Consumes raw error payloads from Redis Streams, parses exception stack traces, derives deterministic fingerprints, and persists events and issues into PostgreSQL.
-- **Reliability Features**:
-  - **Stale PEL Recovery**: Polls `XPENDING` to claim abandoned messages from crashed worker instances.
-  - **Dead Letter Queue (DLQ)**: Retries failed messages up to `MAX_RETRIES` (default 3); messages exceeding this threshold are routed to `events:dlq` with failure metadata.
-  - **Idempotent Acknowledgment**: When encountering a duplicate `event_id`, the worker rolls back the transactional database unit-of-work and issues `XACK` to prevent pipeline stalls.
-
-### 2.5 PostgreSQL Persistent Store
-- **Technology**: PostgreSQL 17.
-- **Role**: Source of truth for all structured relational data:
-  - Multi-tenant workspaces (`tenants`, `users`, `memberships`)
-  - Project configurations (`projects`, `environments`)
-  - Telemetry (`issues`, `error_events`, `metrics`)
-  - Release controls (`releases`, `feature_flags`, `rollouts`, `flag_settings`)
-  - Incident management (`incidents`, `incident_events`, `incident_mitigations`)
-  - Governance (`flag_audit_logs`)
-
----
-
-## 3. Telemetry Ingestion Pipeline
+## 2. Ingestion & Incident Investigation Pipeline
 
 ```
-1. Client App (SDK)
-   |
-   | POST /api/v1/projects/{project_id}/events
-   | (Includes Header: X-ReleaseGuard-Key)
-   v
-2. FastAPI Ingestion Handler
-   |
-   +--> Validate API Key against database / cache
-   +--> Assign UUID4 event_id if not provided
-   +--> XADD to 'events:stream'
-   v
-3. Returns HTTP 202 Accepted {"status": "queued", "event_id": "..."}
-   |
-   v (Asynchronous Boundary)
-4. Redis Stream Worker Process
-   |
-   +--> XREADGROUP / XCLAIM from 'events:stream'
-   +--> Parse stack trace & derive SHA-256 fingerprint
-   +--> Begin PostgreSQL Transaction:
-   |      - Upsert Issue record (atomic count increment, last_seen update)
-   |      - Insert ErrorEvent record (enforcing UNIQUE event_id)
-   +--> Commit Transaction
-   +--> XACK message to Redis
+External Application
+        ↓  (Exceptions / Crashes)
+ReleaseGuard Python SDK
+        ↓  (POST /api/v1/projects/{id}/events/bulk)
+ReleaseGuard Ingestion API (HTTP 202 Accepted)
+        ↓  (XADD events:stream)
+Redis Streams Buffer
+        ↓  (XREADGROUP)
+Background Ingestion Worker (worker.py)
+        ↓  (Normalize stack traces & compute SHA-256 fingerprint)
+Issue Deduplication & Event Persistence (PostgreSQL)
+        ↓  (Spike Detection & Correlation Service)
+Incident Creation & Issue Association
+        ↓  (Advisory Kill-Switch Recommendation)
+Controlled Reversible Mitigation (Human-in-the-Loop)
+        ↓  (Incident Context Aggregation & Secret Scrubbing)
+AI Incident Copilot (Gemini Primary / Fallback)
+        ↓  (Grounded Analysis & Conversational Investigation)
+Operator Dashboard (Evidence Badges, Uncertainties, Reversible Rollback)
 ```
 
 ---
 
-## 4. Feature Flag & Deterministic Rollout Engine
+## 3. Core Architectural Decisions & Rationale
 
-ReleaseGuard provides deterministic, zero-latency feature flag evaluations:
+### 3.1 Why Redis Streams?
+- **Decoupled Telemetry Ingestion**: When production applications crash, they burst telemetry simultaneously. Direct database writes during an incident cause connection pool starvation and database CPU saturation.
+- **Microsecond Ingestion Latency**: The API acknowledges events with `HTTP 202 Accepted` in ~23ms by appending to Redis via `XADD`.
+- **Consumer Group Semantics**: Redis Streams provide built-in consumer group coordination (`XREADGROUP`), persistent offsets, and automatic Pending Entries List (`PEL`) tracking without requiring heavyweight message broker infrastructure (like Apache Kafka).
+- **Stream Trimming**: Bounded memory footprint via approximate stream trimming (`MAXLEN ~ 100,000`).
 
-1. **Deterministic Hashing**:
-   $$\text{Bucket} = \left( \text{CRC32}(\text{flag\_key} + \text{":"} + \text{user\_id}) \pmod{100} \right)$$
-   For any given combination of user ID and flag key, the assigned bucket (0–99) is mathematically invariant.
+### 3.2 Why a Background Worker Process?
+- **CPU-Intensive Normalization**: Parsing multi-frame stack traces, extracting absolute paths, scrubbing memory addresses, and computing cryptographic SHA-256 hashes consumes CPU cycles that should not block asynchronous HTTP request loops.
+- **Transactional Batch Upserts**: The worker batches up to 50 events per tick, deduplicating them into single transactional database operations with row-level advisory locking.
+- **Crash Resilience**: If a worker node crashes mid-batch, the unacknowledged messages remain in the Redis PEL and are reclaimed by peer workers after the visibility timeout.
 
-2. **Rule Hierarchy**:
-   - **Global Project Kill**: If the flag is toggled `OFF`, evaluation immediately returns `false`.
-   - **Environment Specific Override**: If an environment-specific state exists (`flag_settings`), it takes precedence over the global flag state.
-   - **Targeting Rules**: Specific user IDs or attributes explicitly whitelisted are evaluated first.
-   - **Percentage Rollout**: If `bucket < rollout_percentage`, the flag evaluates to `true`; otherwise `false`.
+### 3.3 Why Stack Trace Fingerprinting?
+- **Root-Cause Deduplication**: Without fingerprinting, 100,000 instances of the same bug create 100,000 database issues, blinding on-call engineers.
+- **Deterministic Frame Normalization**: File paths (e.g. `/usr/src/app/checkout.py` vs `C:\app\checkout.py`), memory pointers (`0x7f8a1c02e8`), and transient line shifts are normalized before hashing.
+- **Regression Detection**: When an issue marked `resolved` reappears with the same fingerprint, ReleaseGuard atomically transitions it back to `unresolved` and increments the regression counter.
 
-3. **High-Efficiency Caching**:
-   - The `/api/v1/projects/{project_id}/config` endpoint computes an MD5/SHA ETag across all active flags and rollouts.
-   - Evaluators sending `If-None-Match` receive HTTP `304 Not Modified` with zero database or payload serialization overhead.
+### 3.4 Why Idempotent Event IDs?
+- **Network Retries & Duplicates**: Distributed networks inevitably produce duplicate HTTP dispatches from retry policies or SDK buffer flushes.
+- **Zero Double-Counting**: Every event carries a client-generated UUID4 `event_id`. The database schema enforces a unique constraint on `(project_id, event_id)`.
+- **Clean Acknowledgment**: When the worker encounters a duplicate `IntegrityError`, it rolls back the transaction and immediately calls `XACK` on Redis to discard the redundant stream entry without failing the batch.
 
----
+### 3.5 Why Strict Tenant Scoping?
+- **Multi-Tenant Security Invariant**: Enterprise SaaS requires absolute data isolation between competing organizations.
+- **Zero Client Trust**: Client-supplied `tenant_id` parameters in URL paths or headers are never trusted. Every request verifies authenticated JWT claims against server-side `Membership` tables.
+- **Cross-Tenant Sanitization**: Attempting to query or modify resources belonging to another tenant returns `HTTP 404 Not Found` (rather than 403) to prevent resource existence enumeration.
 
-## 5. Incident Response & Controlled Mitigation Pipeline
+### 3.6 Why Deterministic Feature Flag Evaluation?
+- **Consistent User Experience**: A user assigned to a 10% canary rollout must experience the same variant across repeated page loads, different browser sessions, and mobile devices without storing server-side state.
+- **Mathematical Uniformity**: Evaluated via `CRC32(flag_key + ":" + user_id) % 100`. Rollout distribution is uniform, reproducible, and stateless.
+- **Sub-Millisecond Evaluation**: Flag configurations are cached client-side with ETag/304 validation, responding in ~6ms.
 
-```
-[ Error Telemetry ] ---> [ Statistical Spike Detector ]
-                                  |
-                                  v (Z-Score Threshold Exceeded)
-                        [ Create Incident (Status: Open) ]
-                                  |
-                        [ Automated Root-Cause Analysis ]
-                                  |
-             +--------------------+--------------------+
-             |                                         |
-    [ Release Correlated ]                    [ Feature Flag Correlated ]
-             |                                         |
-             v                                         v
-    [ Generate Mitigation ]                  [ Generate Mitigation ]
-    (Rollback to previous release)           (Kill feature flag to 0%)
-             |                                         |
-             +--------------------+--------------------+
-                                  |
-                                  v
-                    [ Incident Command Dashboard ]
-                                  |
-                    [ Human-In-The-Loop Approval ]
-                    (Explicit Operator Action via RBAC)
-                                  |
-                                  v
-                    [ Atomic Mitigation Execution ]
-                    (Database Transaction + Audit Log)
-                                  |
-                                  v
-                    [ Incident Status: Mitigated / Resolved ]
-```
+### 3.7 Why Reversible Mitigation?
+- **Blast Radius Containment**: Disabling a newly deployed feature flag is the fastest way to stop an error spike without triggering a high-risk production code rollback.
+- **Zero Configuration Loss**: When a kill switch is applied, ReleaseGuard atomically snapshots the flag's pre-mitigation state (e.g., `enabled: true, rollout_percentage: 25%`) into `IncidentMitigation.previous_state`.
+- **One-Click Reversion**: Once the underlying bug is resolved, operators click *"Revert Mitigation"*, which restores the exact pre-incident rollout percentages without manual re-configuration.
+
+### 3.8 Why AI Incident Copilot is Advisory-Only?
+- **Strict Human-in-the-Loop Safety**: AI models must never possess direct authority to alter production feature flags, execute database commands, revert releases, or resolve incidents autonomously.
+- **Hallucination Containment**: All AI hypotheses (H1, H2) are grounded strictly in database telemetry facts. The model is forced to cite verifiable entity IDs (`issue`, `release`, `feature_flag`, `mitigation`, `timeline`). Any unverified citation is stripped and logged under `uncertainties`.
+- **Data Boundary**: AI prompts treat all untrusted incident telemetry, error messages, and chat history strictly as inert data envelopes (`DATA ENVELOPE`), preventing adversarial prompt injection from bypassing authorization.
 
 ---
 
-## 6. Concurrency & Data Integrity Guarantees
+## 4. AI Copilot Multi-Tier Provider Architecture
 
-1. **Idempotency Guarantee**:
-   Every event ingested into ReleaseGuard carries a unique `event_id`. An explicit unique constraint on `error_events.event_id` guarantees that network redeliveries or worker retries cannot corrupt issue occurrence counts.
+```
+                      +-----------------------------+
+                      |   Incident Copilot Request  |
+                      +-----------------------------+
+                                     |
+                         (Double-click dedup & 429)
+                                     v
+                      +-----------------------------+
+                      |   Copilot Request Limiter   |
+                      +-----------------------------+
+                                     |
+                          (Deterministic Hash)
+                                     v
+                      +-----------------------------+
+                      |    Context Cache Check      |
+                      +-----------------------------+
+                               /           \
+                 (Cache Hit)  /             \  (Cache Miss / Refresh)
+                             v               v
+                +-----------------+   +-----------------------------+
+                | Persisted Store |   |   Context Builder & Secret  |
+                +-----------------+   |     Scrubbing Pipeline      |
+                                      +-----------------------------+
+                                                     |
+                                      +--------------v--------------+
+                                      |   Primary Model Evaluation  |
+                                      |     (gemini-3.8-flash)      |
+                                      +-----------------------------+
+                                             /               \
+                              (HTTP 200)    /                 \  (503 / 429 / Timeout)
+                                           v                   v
+                        +----------------------+    +----------------------+
+                        |   Schema Validation  |    |  Exponential Backoff |
+                        +----------------------+    |       (1 Retry)      |
+                                                            +----------------------+
+                                                                       |
+                                                               (Still failing)
+                                                                       v
+                                                            +----------------------+
+                                                            |   Fallback Model     |
+                                                            | (gemini-3.5-flash)   |
+                                                            +----------------------+
+                                                                       |
+                                                            +----------v-----------+
+                                                            |  Evidence Integrity  |
+                                                            |     Verification     |
+                                                            +----------------------+
+                                                                       |
+                                                            +----------v-----------+
+                                                            |   Persist Analysis   |
+                                                            +----------------------+
+```
 
-2. **Issue Aggregation Concurrency**:
-   Concurrent error bursts targeting the same issue are handled via PostgreSQL row-level locks or atomic upsert statements (`INSERT ... ON CONFLICT (project_id, fingerprint) DO UPDATE`), preventing duplicate issue creation races.
+---
 
-3. **Multi-Tenant Row Scoping**:
-   Every database query filters strictly by `tenant_id` and verified user memberships. The backend never accepts client-provided tenant identifiers without validating cryptographic JWT session context.
+## 5. Security & Observability Architecture
 
-4. **Last-Owner Invariant**:
-   Demoting or deleting tenant owners uses transactional row-locking (`SELECT ... FOR UPDATE`) to verify the remaining owner count exceeds 1, guaranteeing no tenant can ever become orphaned.
+- **Secret Scrubbing Middleware**: Regex pattern matching sanitizes Google API keys (`AIzaSy...`), bearer tokens, passwords, and private tokens from logs and outgoing AI context envelopes.
+- **Header Authentication**: External AI provider requests strictly pass authentication via `x-goog-api-key` request headers; query string parameters are forbidden to prevent proxy URL leakage.
+- **Safe Structured Observability**: AI requests log high-cardinality execution metrics (`context_build_ms`, `provider_request_ms`, `total_request_ms`, `model_used`, `cache_hit`, `fallback_used`) while suppressing raw prompts, user messages, and secret values.
+- **Production Liveness Probes**: Dual-probe architecture:
+  - `/health`: Lightweight ASGI liveness check for container orchestrators.
+  - `/health/ready`: Deep dependency check verifying live PostgreSQL transactions and Redis ping.
